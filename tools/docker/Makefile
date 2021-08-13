@@ -25,7 +25,8 @@ help:
 	@echo -e "\t${BOLD}clean_python${RESET}: Clean manylinux2010 and alpine python 'ortools' wheel packages."
 	@echo
 	@echo -e "\t${BOLD}<target>${RESET}:"
-	@echo -e "\t\t${BOLD}manylinux${RESET} (latest)"
+	@echo -e "\t\t${BOLD}manylinux2014_x86_64${RESET} (latest)"
+	@echo -e "\t\t${BOLD}manylinux2014_aarch64${RESET} (latest)"
 	@echo -e "\t\t${BOLD}alpine${RESET} (latest)"
 	@echo
 	@echo -e "\t${BOLD}<stage>${RESET}: build <stage> docker images for ALL DISTROS."
@@ -123,22 +124,22 @@ export/python: | export
 export/python/build-manylinux1.sh: build-manylinux1.sh | export/python
 	cp $< $@
 
-TARGETS = manylinux alpine
+TARGETS = manylinux2014_x86_64 manylinux2014_aarch64 alpine
 targets = $(addprefix python_, $(TARGETS))
 
 .PHONY: python
 python: $(targets)
 
-.PHONY: python_manylinux
-python_manylinux: ortools_python_manylinux
+.PHONY: python_manylinux2014_x86_64 python_manylinux2014_aarch64
+python_manylinux_%: ortools_python_manylinux_%
 	$(DOCKER_RUN_CMD) \
  -v `pwd`/export:/export \
  -it $< \
  /bin/bash -c \
  "/root/build/build-manylinux1.sh /root/src /root/build /export/python"
 
-.PHONY: ortools_python_manylinux
-ortools_python_manylinux: manylinux.Dockerfile export/python/build-manylinux1.sh ../../makefiles
+.PHONY: ortools_python_manylinux_aarch64 ortools_python_manylinux_x86_64
+ortools_python_manylinux_%: manylinux_%.Dockerfile export/python/build-manylinux1.sh ../../makefiles
 	#@docker image rm -f $@ 2>/dev/null
 	$(DOCKER_BUILD_CMD) \
  --tag $@ \
@@ -168,7 +169,7 @@ ortools_python_alpine: alpine.Dockerfile ../../makefiles | export/python
  export/python
 
 .PHONY: save_docker_python
-save_docker_python: export/python/manylinux.tar export/python/alpine.tar
+save_docker_python: export/python/manylinux_x86_64.tar export/python/manylinux_aarch64.tar export/python/alpine.tar
 
 export/python/%.tar: ortools_python_%
 	-rm -f $@

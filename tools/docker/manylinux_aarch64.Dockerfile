@@ -1,4 +1,6 @@
-FROM quay.io/pypa/manylinux2010_x86_64:latest AS env
+# To build it on x86_64 please read
+# https://github.com/multiarch/qemu-user-static#getting-started
+FROM quay.io/pypa/manylinux2014_aarch64:latest AS env
 
 RUN yum -y update \
 && yum -y install \
@@ -21,10 +23,10 @@ RUN yum -y update \
 && rm -rf /var/cache/yum
 
 # Install CMake 3.21.1
-RUN wget "https://cmake.org/files/v3.21/cmake-3.21.1-linux-x86_64.sh" \
-&& chmod a+x cmake-3.21.1-linux-x86_64.sh \
-&& ./cmake-3.21.1-linux-x86_64.sh --prefix=/usr --skip-license \
-&& rm cmake-3.21.1-linux-x86_64.sh
+RUN wget "https://cmake.org/files/v3.21/cmake-3.21.1-linux-aarch64.sh" \
+&& chmod a+x cmake-3.21.1-linux-aarch64.sh \
+&& ./cmake-3.21.1-linux-aarch64.sh --prefix=/usr --skip-license \
+&& rm cmake-3.21.1-linux-aarch64.sh
 
 # Install Swig 4.0.2
 RUN curl --location-trusted \
