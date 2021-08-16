@@ -44,32 +44,20 @@ RUN curl --location-trusted \
 ENV TZ=America/Los_Angeles
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
-ENV BUILD_ROOT /root/build
-ENV EXPORT_ROOT /export
-# The build of Python 2.6.x bindings is known to be broken.
-# Python3.4 include conflict with abseil-cpp dynamic_annotation.h
-ENV SKIP_PLATFORMS "cp27-cp27m cp27-cp27mu cp34-cp34m cp35-cp35m"
-
-COPY build-manylinux1.sh "$BUILD_ROOT/"
-RUN chmod a+x "${BUILD_ROOT}/build-manylinux1.sh"
-
 ################
 ##  OR-TOOLS  ##
 ################
 FROM env AS devel
 ENV SRC_GIT_URL https://github.com/google/or-tools
-ENV SRC_ROOT /root/src
-WORKDIR "$BUILD_ROOT"
 
 ARG SRC_GIT_BRANCH
 ENV SRC_GIT_BRANCH ${SRC_GIT_BRANCH:-master}
 ARG SRC_GIT_SHA1
 ENV SRC_GIT_SHA1 ${SRC_GIT_SHA1:-unknown}
-RUN git clone -b "$SRC_GIT_BRANCH" --single-branch "$SRC_GIT_URL" "$SRC_ROOT"
+RUN git clone -b "$SRC_GIT_BRANCH" --single-branch "$SRC_GIT_URL" /project
 
-FROM devel AS third_party
-WORKDIR "$SRC_ROOT"
-RUN make third_party
-
-FROM third_party as build
-RUN make cc
+FROM devel AS build
+WORKDIR /project
+COPY build-manylinux.sh .
+RUN chmod a+x "build-manylinux.sh"
+RUN ./build-manylinux.sh
