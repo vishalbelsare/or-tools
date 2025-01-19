@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -27,10 +27,13 @@
 #define OR_TOOLS_GRAPH_CHRISTOFIDES_H_
 
 #include <cstdint>
+#include <functional>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "ortools/base/integral_types.h"
 #include "ortools/base/logging.h"
 #include "ortools/graph/eulerian_path.h"
 #include "ortools/graph/graph.h"
@@ -81,15 +84,7 @@ class ChristofidesPathSolver {
   bool Solve();
 
  private:
-  // Safe addition operator to avoid overflows when possible.
-  //template <typename T>
-  //T SafeAdd(T a, T b) {
-  //  return a + b;
-  //}
-  //template <>
-  int64_t SafeAdd(int64_t a, int64_t b) {
-    return CapAdd(a, b);
-  }
+  int64_t SafeAdd(int64_t a, int64_t b) { return CapAdd(a, b); }
 
   // Matching algorithm to use.
   MatchingAlgorithm matching_;
@@ -122,7 +117,7 @@ ComputeMinimumWeightMatching(const GraphType& graph,
   for (NodeIndex tail : graph.AllNodes()) {
     for (const ArcIndex arc : graph.OutgoingArcs(tail)) {
       const NodeIndex head = graph.Head(arc);
-      // Adding both arcs is redudant for MinCostPerfectMatching.
+      // Adding both arcs is redundant for MinCostPerfectMatching.
       if (tail < head) {
         matching.AddEdgeWithCost(tail, head, weight(arc));
       }

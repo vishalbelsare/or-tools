@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -11,6 +11,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <stdlib.h>
+
+#include "absl/types/span.h"
 #include "ortools/sat/cp_model.h"
 
 namespace operations_research {
@@ -21,7 +24,9 @@ void BoolOrSampleSat() {
 
   const BoolVar x = cp_model.NewBoolVar();
   const BoolVar y = cp_model.NewBoolVar();
-  cp_model.AddBoolOr({x, Not(y)});
+  cp_model.AddBoolOr({x, ~y});
+  // You can also use the ~ operator.
+  cp_model.AddBoolOr({x, ~y});
 }
 
 }  // namespace sat

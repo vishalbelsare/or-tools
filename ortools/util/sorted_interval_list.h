@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -14,7 +14,9 @@
 #ifndef OR_TOOLS_UTIL_SORTED_INTERVAL_LIST_H_
 #define OR_TOOLS_UTIL_SORTED_INTERVAL_LIST_H_
 
+#include <cstdint>
 #include <iterator>
+#include <ostream>
 #include <set>
 #include <string>
 #include <utility>
@@ -22,7 +24,6 @@
 
 #include "absl/container/inlined_vector.h"
 #include "absl/types/span.h"
-#include "ortools/base/integral_types.h"
 #include "ortools/base/logging.h"
 
 namespace operations_research {
@@ -47,6 +48,11 @@ struct ClosedInterval {
   // the same start appear since they will always be merged into one interval.
   bool operator<(const ClosedInterval& other) const {
     return start < other.start;
+  }
+
+  template <typename H>
+  friend H AbslHashValue(H h, const ClosedInterval& interval) {
+    return H::combine(std::move(h), interval.start, interval.end);
   }
 
   int64_t start = 0;  // Inclusive.
@@ -94,10 +100,10 @@ class Domain {
   }
 
   /// Move constructor.
-  Domain(Domain&& other) : intervals_(std::move(other.intervals_)) {}
+  Domain(Domain&& other) noexcept : intervals_(std::move(other.intervals_)) {}
 
   /// Move operator.
-  Domain& operator=(Domain&& other) {
+  Domain& operator=(Domain&& other) noexcept {
     intervals_ = std::move(other.intervals_);
     return *this;
   }
@@ -227,6 +233,20 @@ class Domain {
   int64_t Size() const;
 
   /**
+   * Returns true if the domain has just two values. This often mean a non-fixed
+   * Boolean variable.
+   */
+  bool HasTwoValues() const {
+    if (intervals_.size() == 1) {
+      return intervals_[0].end == intervals_[0].start + 1;
+    } else if (intervals_.size() == 2) {
+      return intervals_[0].end == intervals_[0].start &&
+             intervals_[1].end == intervals_[1].start;
+    }
+    return false;
+  }
+
+  /**
    * Returns the min value of the domain.
    * The domain must not be empty.
    */
@@ -242,6 +262,25 @@ class Domain {
    * Returns the value closest to zero. If there is a tie, pick positive one.
    */
   int64_t SmallestValue() const;
+
+  /**
+   * Returns the value closest to the given point.
+   * If there is a tie, pick larger one.
+   */
+  int64_t ClosestValue(int64_t wanted) const;
+
+  /**
+   * Returns the closest value in the domain that is <= (resp. >=) to the input.
+   * Do not change the input if there is no such value.
+   */
+  int64_t ValueAtOrBefore(int64_t input) const;
+  int64_t ValueAtOrAfter(int64_t input) const;
+
+  /**
+   * If the domain contains zero, this return the simple interval around it.
+   * Otherwise, this returns an empty domain.
+   */
+  Domain PartAroundZero() const;
 
   /**
    * Returns true iff the domain is reduced to a single value.
@@ -260,6 +299,11 @@ class Domain {
    * Returns true iff value is in Domain.
    */
   bool Contains(int64_t value) const;
+
+  /**
+   * Returns the distance from the value to the domain.
+   */
+  int64_t Distance(int64_t value) const;
 
   /**
    * Returns true iff D is included in the given domain.
@@ -352,14 +396,15 @@ class Domain {
    *
    * For instance Domain(1, 7).InverseMultiplicationBy(2) == Domain(1, 3).
    */
-  Domain InverseMultiplicationBy(const int64_t coeff) const;
+  Domain InverseMultiplicationBy(int64_t coeff) const;
 
   /**
    * Returns a superset of {x ∈ Int64, ∃ e ∈ D, ∃ m ∈ modulo, x = e % m }.
    *
    * We check that modulo is strictly positive.
    * The sign of the modulo depends on the sign of e.
-   * For now we just intersect with the min/max possible value.
+   * We compute the exact min/max if the modulo is fixed, otherwise we will
+   * just return a superset.
    */
   Domain PositiveModuloBySuperset(const Domain& modulo) const;
 
@@ -370,6 +415,11 @@ class Domain {
    * For now we just intersect with the min/max possible value.
    */
   Domain PositiveDivisionBySuperset(const Domain& divisor) const;
+
+  /**
+   * Returns a superset of {x ∈ Int64, ∃ y ∈ D, x = y * y }.
+   */
+  Domain SquareSuperset() const;
 
   /**
    * Advanced usage. Given some \e implied information on this domain that is
@@ -411,6 +461,11 @@ class Domain {
     return intervals_ != other.intervals_;
   }
 
+  template <typename H>
+  friend H AbslHashValue(H h, const Domain& domain) {
+    return H::combine(std::move(h), domain.intervals_);
+  }
+
   /**
    * Basic read-only std::vector<> wrapping to view a Domain as a sorted list of
    * non-adjacent intervals. Note that we don't expose size() which might be
@@ -425,14 +480,6 @@ class Domain {
   }
   absl::InlinedVector<ClosedInterval, 1>::const_iterator end() const {
     return intervals_.end();
-  }
-
-  // Deprecated.
-  //
-  // TODO(user): remove, this makes a copy and is of a different type that our
-  // internal InlinedVector() anyway.
-  std::vector<ClosedInterval> intervals() const {
-    return {intervals_.begin(), intervals_.end()};
   }
 
  private:

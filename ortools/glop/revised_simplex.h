@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -95,12 +95,15 @@
 #include <string>
 #include <vector>
 
+#include "absl/base/attributes.h"
+#include "absl/log/die_if_null.h"
 #include "absl/random/bit_gen_ref.h"
-#include "ortools/base/integral_types.h"
-#include "ortools/base/macros.h"
+#include "absl/random/random.h"
+#include "ortools/base/types.h"
 #include "ortools/glop/basis_representation.h"
 #include "ortools/glop/dual_edge_norms.h"
 #include "ortools/glop/entering_variable.h"
+#include "ortools/glop/lu_factorization.h"
 #include "ortools/glop/parameters.pb.h"
 #include "ortools/glop/pricing.h"
 #include "ortools/glop/primal_edge_norms.h"
@@ -113,8 +116,12 @@
 #include "ortools/lp_data/lp_print_utils.h"
 #include "ortools/lp_data/lp_types.h"
 #include "ortools/lp_data/scattered_vector.h"
+#include "ortools/lp_data/sparse.h"
+#include "ortools/lp_data/sparse_column.h"
 #include "ortools/lp_data/sparse_row.h"
+#include "ortools/util/logging.h"
 #include "ortools/util/random_engine.h"
+#include "ortools/util/stats.h"
 #include "ortools/util/time_limit.h"
 
 namespace operations_research {
@@ -124,6 +131,10 @@ namespace glop {
 class RevisedSimplex {
  public:
   RevisedSimplex();
+
+  // This type is neither copyable nor movable.
+  RevisedSimplex(const RevisedSimplex&) = delete;
+  RevisedSimplex& operator=(const RevisedSimplex&) = delete;
 
   // Sets or gets the algorithm parameters to be used on the next Solve().
   void SetParameters(const GlopParameters& parameters);
@@ -165,6 +176,7 @@ class RevisedSimplex {
   // matrices. Note that this call will be ignored if Solve() was never called
   // or if ClearStateForNextSolve() was called.
   void NotifyThatMatrixIsUnchangedForNextSolve();
+  void NotifyThatMatrixIsChangedForNextSolve();
 
   // Getters to retrieve all the information computed by the last Solve().
   RowIndex GetProblemNumRows() const;
@@ -234,6 +246,8 @@ class RevisedSimplex {
   void ClearIntegralityScales() { integrality_scale_.clear(); }
   void SetIntegralityScale(ColIndex col, Fractional scale);
 
+  void SetLogger(SolverLogger* logger) { logger_ = logger; }
+
  private:
   struct IterationStats : public StatsGroup {
     IterationStats()
@@ -275,6 +289,16 @@ class RevisedSimplex {
 
   enum class Phase { FEASIBILITY, OPTIMIZATION, PUSH };
 
+  enum class RefactorizationReason {
+    DEFAULT,
+    SMALL_PIVOT,
+    IMPRECISE_PIVOT,
+    NORM,
+    RC,
+    VAR_VALUES,
+    FINAL_CHECK
+  };
+
   // Propagates parameters_ to all the other classes that need it.
   //
   // TODO(user): Maybe a better design is for them to have a reference to a
@@ -301,7 +325,8 @@ class RevisedSimplex {
   std::string SimpleVariableInfo(ColIndex col) const;
 
   // Displays a short string with the current iteration and objective value.
-  void DisplayIterationInfo();
+  void DisplayIterationInfo(bool primal, RefactorizationReason reason =
+                                             RefactorizationReason::DEFAULT);
 
   // Displays the error bounds of the current solution.
   void DisplayErrors();
@@ -508,7 +533,7 @@ class RevisedSimplex {
   // This must be called each time the dual_pricing_vector_ is changed at
   // position row.
   template <bool use_dense_update = false>
-  void OnDualPriceChange(const DenseColumn& squared_norms, RowIndex row,
+  void OnDualPriceChange(DenseColumn::ConstView squared_norms, RowIndex row,
                          VariableType type, Fractional threshold);
 
   // Updates the prices used by DualChooseLeavingVariableRow() when the reduced
@@ -664,10 +689,14 @@ class RevisedSimplex {
   // Array of column index, giving the column number corresponding
   // to a given basis row.
   RowToColMapping basis_;
+  RowToColMapping tmp_basis_;
 
   // Vector of strings containing the names of variables.
   // Indexed by column number.
   StrictITIVector<ColIndex, std::string> variable_name_;
+
+  // Only used for logging. What triggered a refactorization.
+  RefactorizationReason last_refactorization_reason_;
 
   // Information about the solution computed by the last Solve().
   Fractional solution_objective_value_;
@@ -700,10 +729,14 @@ class RevisedSimplex {
   // non-deterministic behavior and avoid client depending on a golden optimal
   // solution which prevent us from easily changing the solver.
   random_engine_t deterministic_random_;
-#ifndef NDEBUG
   absl::BitGen absl_random_;
-#endif
+
+  // A reference to one of the above random generators. Fixed at construction.
   absl::BitGenRef random_;
+
+  // Helpers for logging the solve progress.
+  SolverLogger default_logger_;
+  SolverLogger* logger_ = &default_logger_;
 
   // Representation of matrix B using eta matrices and LU decomposition.
   BasisFactorization basis_factorization_;
@@ -721,6 +754,7 @@ class RevisedSimplex {
 
   // Used in dual phase I to hold the price of each possible leaving choices.
   DenseColumn dual_pricing_vector_;
+  DenseColumn tmp_dual_pricing_vector_;
 
   // Temporary memory used by DualMinimize().
   std::vector<ColIndex> bound_flip_candidates_;
@@ -802,8 +836,6 @@ class RevisedSimplex {
 
   // This is used by Polish().
   DenseRow integrality_scale_;
-
-  DISALLOW_COPY_AND_ASSIGN(RevisedSimplex);
 };
 
 // Hides the details of the dictionary matrix implementation. In the future,
@@ -824,6 +856,10 @@ class RevisedSimplexDictionary {
             ABSL_DIE_IF_NULL(revised_simplex)->ComputeDictionary(col_scales)),
         basis_vars_(ABSL_DIE_IF_NULL(revised_simplex)->GetBasisVector()) {}
 
+  // This type is neither copyable nor movable.
+  RevisedSimplexDictionary(const RevisedSimplexDictionary&) = delete;
+  RevisedSimplexDictionary& operator=(const RevisedSimplexDictionary&) = delete;
+
   ConstIterator begin() const { return dictionary_.begin(); }
   ConstIterator end() const { return dictionary_.end(); }
 
@@ -836,7 +872,6 @@ class RevisedSimplexDictionary {
  private:
   const RowMajorSparseMatrix dictionary_;
   const RowToColMapping basis_vars_;
-  DISALLOW_COPY_AND_ASSIGN(RevisedSimplexDictionary);
 };
 
 // TODO(user): When a row-by-row generation of the dictionary is supported,

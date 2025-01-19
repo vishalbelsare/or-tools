@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -24,10 +24,12 @@
 #ifndef OR_TOOLS_GRAPH_CLIQUES_H_
 #define OR_TOOLS_GRAPH_CLIQUES_H_
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <limits>
 #include <numeric>
+#include <string>
 #include <vector>
 
 #include "absl/strings/str_cat.h"
@@ -274,7 +276,7 @@ class BronKerboschAlgorithm {
     // clique.
     // NOTE(user): We could store the delta between the iterations; however,
     // we need to evaluate the impact this would have on the performance.
-    absl::StrongVector<CandidateIndex, NodeIndex> candidates;
+    util_intops::StrongVector<CandidateIndex, NodeIndex> candidates;
     // The index of the first actual candidate in 'candidates'. This number is
     // also the number of elements of the "not" set stored at the beginning of
     // 'candidates'.
@@ -347,7 +349,7 @@ class BronKerboschAlgorithm {
   // A vector that receives the current clique found by the algorithm.
   std::vector<NodeIndex> current_clique_;
 
-  // Set to true if the algorithm is active (it was not stopped by an the clique
+  // Set to true if the algorithm is active (it was not stopped by a the clique
   // callback).
   int64_t num_remaining_iterations_;
 
@@ -450,7 +452,7 @@ void BronKerboschAlgorithm<NodeIndex>::PushState(NodeIndex selected) {
   DCHECK(time_limit_ != nullptr);
   DVLOG(2) << "PushState: New depth = " << states_.size() + 1
            << ", selected node = " << selected;
-  absl::StrongVector<CandidateIndex, NodeIndex> new_candidates;
+  util_intops::StrongVector<CandidateIndex, NodeIndex> new_candidates;
 
   State* const previous_state = &states_.back();
   const double deterministic_time =

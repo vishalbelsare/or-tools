@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -12,22 +12,24 @@
 // limitations under the License.
 
 // Provides a safe C++ interface for SCIP event handlers, which are described at
-// https://www.scipopt.org/doc-7.0.1/html/EVENT.php.
+// https://www.scipopt.org/doc/html/EVENT.php.
 #ifndef OR_TOOLS_GSCIP_GSCIP_EVENT_HANDLER_H_
 #define OR_TOOLS_GSCIP_GSCIP_EVENT_HANDLER_H_
 
 #include <string>
 #include <vector>
 
-#include "ortools/gscip/gscip.h"
+#include "absl/status/status.h"
 #include "scip/type_event.h"
 
 namespace operations_research {
 
+class GScip;
+
 struct GScipEventHandlerDescription {
   // For the first two members below, the SCIP constraint handler
   // property name is provided. See
-  // https://www.scipopt.org/doc-7.0.1/html/EVENT.php#EVENTHDLR_PROPERTIES for
+  // https://www.scipopt.org/doc/html/EVENT.php#EVENTHDLR_PROPERTIES for
   // details.
 
   // See CONSHDLR_NAME in SCIP documentation above.
@@ -92,15 +94,19 @@ class GScipEventHandler {
   explicit GScipEventHandler(const GScipEventHandlerDescription& description)
       : description_(description) {}
 
+  GScipEventHandler(const GScipEventHandler&) = delete;
+  GScipEventHandler& operator=(const GScipEventHandler&) = delete;
+
   virtual ~GScipEventHandler() = default;
 
   // Registers this event handler to the given GScip.
   //
-  // This function CHECKs that this handler has not been previously registered.
+  // This function returns an internal Status error if this handler has already
+  // been registered.
   //
   // The given GScip won't own this handler but will keep a pointer to it that
   // will be used during the solve.
-  void Register(GScip* gscip);
+  absl::Status Register(GScip* gscip);
 
   // Initialization of the event handler. Called after the problem was
   // transformed.
@@ -132,7 +138,7 @@ class GScipEventHandler {
   virtual SCIP_RETCODE Exit(GScip* gscip) { return SCIP_OKAY; }
 
  protected:
-  // Catches a global event (i.e. not a variable or row depedent one) based on
+  // Catches a global event (i.e. not a variable or row dependent one) based on
   // the input event_type mask.
   //
   // This method must only be called after the problem is transformed; typically

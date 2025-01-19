@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -22,15 +22,23 @@
 #define OR_TOOLS_SAT_SAT_INPROCESSING_H_
 
 #include <cstdint>
+#include <deque>
+#include <vector>
 
+#include "absl/strings/string_view.h"
+#include "absl/types/span.h"
 #include "ortools/base/strong_vector.h"
 #include "ortools/sat/clause.h"
+#include "ortools/sat/drat_checker.h"
+#include "ortools/sat/linear_programming_constraint.h"
 #include "ortools/sat/model.h"
 #include "ortools/sat/sat_base.h"
 #include "ortools/sat/sat_decision.h"
+#include "ortools/sat/sat_parameters.pb.h"
 #include "ortools/sat/sat_solver.h"
 #include "ortools/sat/util.h"
 #include "ortools/util/integer_pq.h"
+#include "ortools/util/strong_integers.h"
 #include "ortools/util/time_limit.h"
 
 namespace operations_research {
@@ -49,9 +57,9 @@ struct PostsolveClauses {
   std::deque<std::vector<Literal>> clauses;
 };
 
-class StampingSimplifier;
 class BlockedClauseSimplifier;
 class BoundedVariableElimination;
+class StampingSimplifier;
 
 struct SatPresolveOptions {
   // The time budget to spend.
@@ -90,17 +98,22 @@ class Inprocessing {
  public:
   explicit Inprocessing(Model* model)
       : assignment_(model->GetOrCreate<Trail>()->Assignment()),
+        params_(*model->GetOrCreate<SatParameters>()),
         implication_graph_(model->GetOrCreate<BinaryImplicationGraph>()),
-        clause_manager_(model->GetOrCreate<LiteralWatchers>()),
+        clause_manager_(model->GetOrCreate<ClauseManager>()),
         trail_(model->GetOrCreate<Trail>()),
         decision_policy_(model->GetOrCreate<SatDecisionPolicy>()),
         time_limit_(model->GetOrCreate<TimeLimit>()),
         sat_solver_(model->GetOrCreate<SatSolver>()),
+        all_lp_constraints_(
+            model->GetOrCreate<LinearProgrammingConstraintCollection>()),
         stamping_simplifier_(model->GetOrCreate<StampingSimplifier>()),
         blocked_clause_simplifier_(
             model->GetOrCreate<BlockedClauseSimplifier>()),
         bounded_variable_elimination_(
             model->GetOrCreate<BoundedVariableElimination>()),
+        postsolve_(model->GetOrCreate<PostsolveClauses>()),
+        logger_(model->GetOrCreate<SolverLogger>()),
         model_(model) {}
 
   // Does some simplifications until a fix point is reached or the given
@@ -133,18 +146,28 @@ class Inprocessing {
   // reductions that can be performed. Returns false if UNSAT.
   bool SubsumeAndStrenghtenRound(bool log_info);
 
+  // A bit hacky. Only needed during refactoring.
+  void ProvideLogger(SolverLogger* logger) { logger_ = logger; }
+
  private:
   const VariablesAssignment& assignment_;
+  const SatParameters& params_;
   BinaryImplicationGraph* implication_graph_;
-  LiteralWatchers* clause_manager_;
+  ClauseManager* clause_manager_;
   Trail* trail_;
   SatDecisionPolicy* decision_policy_;
   TimeLimit* time_limit_;
   SatSolver* sat_solver_;
+  LinearProgrammingConstraintCollection* all_lp_constraints_;
   StampingSimplifier* stamping_simplifier_;
   BlockedClauseSimplifier* blocked_clause_simplifier_;
   BoundedVariableElimination* bounded_variable_elimination_;
+  PostsolveClauses* postsolve_;
+  SolverLogger* logger_;
 
+  // Inprocessing dtime.
+  bool first_inprocessing_call_ = true;
+  double reference_dtime_ = 0.0;
   double total_dtime_ = 0.0;
 
   // TODO(user): This is only used for calling probing. We should probably
@@ -174,7 +197,7 @@ class StampingSimplifier {
   explicit StampingSimplifier(Model* model)
       : assignment_(model->GetOrCreate<Trail>()->Assignment()),
         implication_graph_(model->GetOrCreate<BinaryImplicationGraph>()),
-        clause_manager_(model->GetOrCreate<LiteralWatchers>()),
+        clause_manager_(model->GetOrCreate<ClauseManager>()),
         random_(model->GetOrCreate<ModelRandomGenerator>()),
         time_limit_(model->GetOrCreate<TimeLimit>()) {}
 
@@ -207,7 +230,7 @@ class StampingSimplifier {
  private:
   const VariablesAssignment& assignment_;
   BinaryImplicationGraph* implication_graph_;
-  LiteralWatchers* clause_manager_;
+  ClauseManager* clause_manager_;
   ModelRandomGenerator* random_;
   TimeLimit* time_limit_;
 
@@ -221,20 +244,20 @@ class StampingSimplifier {
   int64_t num_fixed_ = 0;
 
   // Encode a spanning tree of the implication graph.
-  absl::StrongVector<LiteralIndex, LiteralIndex> parents_;
+  util_intops::StrongVector<LiteralIndex, LiteralIndex> parents_;
 
   // Adjacency list representation of the parents_ tree.
-  absl::StrongVector<LiteralIndex, int> sizes_;
-  absl::StrongVector<LiteralIndex, int> starts_;
+  util_intops::StrongVector<LiteralIndex, int> sizes_;
+  util_intops::StrongVector<LiteralIndex, int> starts_;
   std::vector<LiteralIndex> children_;
 
   // Temporary data for the DFS.
-  absl::StrongVector<LiteralIndex, bool> marked_;
+  util_intops::StrongVector<LiteralIndex, bool> marked_;
   std::vector<LiteralIndex> dfs_stack_;
 
   // First/Last visited index in a DFS of the tree above.
-  absl::StrongVector<LiteralIndex, int> first_stamps_;
-  absl::StrongVector<LiteralIndex, int> last_stamps_;
+  util_intops::StrongVector<LiteralIndex, int> first_stamps_;
+  util_intops::StrongVector<LiteralIndex, int> last_stamps_;
 };
 
 // A clause c is "blocked" by a literal l if all clauses containing the
@@ -253,7 +276,7 @@ class BlockedClauseSimplifier {
   explicit BlockedClauseSimplifier(Model* model)
       : assignment_(model->GetOrCreate<Trail>()->Assignment()),
         implication_graph_(model->GetOrCreate<BinaryImplicationGraph>()),
-        clause_manager_(model->GetOrCreate<LiteralWatchers>()),
+        clause_manager_(model->GetOrCreate<ClauseManager>()),
         postsolve_(model->GetOrCreate<PostsolveClauses>()),
         time_limit_(model->GetOrCreate<TimeLimit>()) {}
 
@@ -267,7 +290,7 @@ class BlockedClauseSimplifier {
 
   const VariablesAssignment& assignment_;
   BinaryImplicationGraph* implication_graph_;
-  LiteralWatchers* clause_manager_;
+  ClauseManager* clause_manager_;
   PostsolveClauses* postsolve_;
   TimeLimit* time_limit_;
 
@@ -276,18 +299,18 @@ class BlockedClauseSimplifier {
   int64_t num_inspected_literals_ = 0;
 
   // Temporary vector to mark literal of a clause.
-  absl::StrongVector<LiteralIndex, bool> marked_;
+  util_intops::StrongVector<LiteralIndex, bool> marked_;
 
   // List of literal to process.
   // TODO(user): use priority queue?
-  absl::StrongVector<LiteralIndex, bool> in_queue_;
+  util_intops::StrongVector<LiteralIndex, bool> in_queue_;
   std::deque<Literal> queue_;
 
   // We compute the occurrence graph just once at the beginning of each round
   // and we do not shrink it as we remove blocked clauses.
-  DEFINE_INT_TYPE(ClauseIndex, int32_t);
-  absl::StrongVector<ClauseIndex, SatClause*> clauses_;
-  absl::StrongVector<LiteralIndex, std::vector<ClauseIndex>>
+  DEFINE_STRONG_INDEX_TYPE(rat_literal_clause_index);
+  util_intops::StrongVector<ClauseIndex, SatClause*> clauses_;
+  util_intops::StrongVector<LiteralIndex, std::vector<ClauseIndex>>
       literal_to_clauses_;
 };
 
@@ -297,7 +320,7 @@ class BoundedVariableElimination {
       : parameters_(*model->GetOrCreate<SatParameters>()),
         assignment_(model->GetOrCreate<Trail>()->Assignment()),
         implication_graph_(model->GetOrCreate<BinaryImplicationGraph>()),
-        clause_manager_(model->GetOrCreate<LiteralWatchers>()),
+        clause_manager_(model->GetOrCreate<ClauseManager>()),
         postsolve_(model->GetOrCreate<PostsolveClauses>()),
         trail_(model->GetOrCreate<Trail>()),
         time_limit_(model->GetOrCreate<TimeLimit>()) {}
@@ -325,7 +348,7 @@ class BoundedVariableElimination {
   const SatParameters& parameters_;
   const VariablesAssignment& assignment_;
   BinaryImplicationGraph* implication_graph_;
-  LiteralWatchers* clause_manager_;
+  ClauseManager* clause_manager_;
   PostsolveClauses* postsolve_;
   Trail* trail_;
   TimeLimit* time_limit_;
@@ -344,7 +367,7 @@ class BoundedVariableElimination {
   int64_t score_threshold_;
 
   // Temporary vector to mark literal of a clause and compute its resolvant.
-  absl::StrongVector<LiteralIndex, bool> marked_;
+  util_intops::StrongVector<LiteralIndex, bool> marked_;
   std::vector<Literal> resolvant_;
 
   // Priority queue of variable to process.
@@ -362,17 +385,17 @@ class BoundedVariableElimination {
   IntegerPriorityQueue<VariableWithPriority> queue_;
 
   // We update the queue_ in batch.
-  absl::StrongVector<BooleanVariable, bool> in_need_to_be_updated_;
+  util_intops::StrongVector<BooleanVariable, bool> in_need_to_be_updated_;
   std::vector<BooleanVariable> need_to_be_updated_;
 
   // We compute the occurrence graph just once at the beginning of each round.
   // We maintains the sizes at all time and lazily shrink the graph with deleted
   // clauses.
-  DEFINE_INT_TYPE(ClauseIndex, int32_t);
-  absl::StrongVector<ClauseIndex, SatClause*> clauses_;
-  absl::StrongVector<LiteralIndex, std::vector<ClauseIndex>>
+  DEFINE_STRONG_INDEX_TYPE(ClauseIndex);
+  util_intops::StrongVector<ClauseIndex, SatClause*> clauses_;
+  util_intops::StrongVector<LiteralIndex, std::vector<ClauseIndex>>
       literal_to_clauses_;
-  absl::StrongVector<LiteralIndex, int> literal_to_num_clauses_;
+  util_intops::StrongVector<LiteralIndex, int> literal_to_num_clauses_;
 };
 
 }  // namespace sat

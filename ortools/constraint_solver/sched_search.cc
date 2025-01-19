@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -11,14 +11,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <limits>
 #include <string>
 #include <vector>
 
+#include "absl/container/flat_hash_set.h"
+#include "absl/log/check.h"
 #include "absl/strings/str_format.h"
-#include "ortools/base/integral_types.h"
 #include "ortools/base/logging.h"
 #include "ortools/constraint_solver/constraint_solver.h"
 #include "ortools/constraint_solver/constraint_solveri.h"
@@ -134,7 +136,7 @@ void SequenceVar::ActiveHorizonRange(int64_t* const hmin,
   int64_t hor_min = std::numeric_limits<int64_t>::max();
   int64_t hor_max = std::numeric_limits<int64_t>::min();
   for (int i = 0; i < intervals_.size(); ++i) {
-    if (!gtl::ContainsKey(decided, i)) {
+    if (!decided.contains(i)) {
       IntervalVar* const t = intervals_[i];
       hor_min = std::min(hor_min, t->StartMin());
       hor_max = std::max(hor_max, t->EndMax());

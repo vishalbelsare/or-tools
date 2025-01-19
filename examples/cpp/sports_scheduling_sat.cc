@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -43,12 +43,14 @@
 // We also introduces a variable at_home[d][i] which is true if team i
 // plays any opponent at home on day d.
 
-#include "absl/flags/parse.h"
-#include "absl/flags/usage.h"
+#include <string>
+#include <vector>
+
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_join.h"
 #include "ortools/base/commandlineflags.h"
+#include "ortools/base/init_google.h"
 #include "ortools/base/logging.h"
 #include "ortools/sat/cp_model.h"
 #include "ortools/sat/cp_model.pb.h"
@@ -96,9 +98,8 @@ void OpponentModel(int num_teams) {
       builder.AddNotEqual(signed_opp, t + num_teams);
 
       // Link opponent, home_away, and signed_opponent.
-      builder.AddEquality(opp, signed_opp).OnlyEnforceIf(Not(home));
-      builder.AddEquality(LinearExpr(opp).AddConstant(num_teams), signed_opp)
-          .OnlyEnforceIf(home);
+      builder.AddEquality(opp, signed_opp).OnlyEnforceIf(~home);
+      builder.AddEquality(opp + num_teams, signed_opp).OnlyEnforceIf(home);
     }
   }
 
@@ -108,17 +109,17 @@ void OpponentModel(int num_teams) {
     std::vector<IntVar> day_home_aways;
     for (int t = 0; t < num_teams; ++t) {
       day_opponents.push_back(opponents[t][d]);
-      day_home_aways.push_back(home_aways[t][d]);
+      day_home_aways.push_back(IntVar(home_aways[t][d]));
     }
 
     builder.AddInverseConstraint(day_opponents, day_opponents);
 
     for (int first_team = 0; first_team < num_teams; ++first_team) {
-      IntVar first_home = day_home_aways[first_team];
-      IntVar second_home = builder.NewBoolVar();
+      const IntVar first_home = IntVar(day_home_aways[first_team]);
+      const IntVar second_home = IntVar(builder.NewBoolVar());
       builder.AddVariableElement(day_opponents[first_team], day_home_aways,
                                  second_home);
-      builder.AddEquality(LinearExpr::Sum({first_home, second_home}), 1);
+      builder.AddEquality(first_home + second_home, 1);
     }
 
     builder.AddEquality(LinearExpr::Sum(day_home_aways), num_teams / 2);
@@ -141,15 +142,14 @@ void OpponentModel(int num_teams) {
       builder.AddAllDifferent(moving);
     }
 
-    builder.AddEquality(LinearExpr::BooleanSum(home_aways[t]), num_teams - 1);
+    builder.AddEquality(LinearExpr::Sum(home_aways[t]), num_teams - 1);
 
     // Forbid sequence of 3 homes or 3 aways.
     for (int start = 0; start < num_days - 2; ++start) {
       builder.AddBoolOr({home_aways[t][start], home_aways[t][start + 1],
                          home_aways[t][start + 2]});
-      builder.AddBoolOr({Not(home_aways[t][start]),
-                         Not(home_aways[t][start + 1]),
-                         Not(home_aways[t][start + 2])});
+      builder.AddBoolOr({~home_aways[t][start], ~home_aways[t][start + 1],
+                         ~home_aways[t][start + 2]});
     }
   }
 
@@ -159,14 +159,13 @@ void OpponentModel(int num_teams) {
     for (int d = 0; d < num_days - 1; ++d) {
       BoolVar break_var =
           builder.NewBoolVar().WithName(absl::StrCat("break_", t, "_", d));
-      builder.AddBoolOr(
-          {Not(home_aways[t][d]), Not(home_aways[t][d + 1]), break_var});
+      builder.AddBoolOr({~home_aways[t][d], ~home_aways[t][d + 1], break_var});
       builder.AddBoolOr({home_aways[t][d], home_aways[t][d + 1], break_var});
       breaks.push_back(break_var);
     }
   }
 
-  builder.Minimize(LinearExpr::BooleanSum(breaks));
+  builder.Minimize(LinearExpr::Sum(breaks));
 
   Model model;
   if (!absl::GetFlag(FLAGS_params).empty()) {
@@ -234,7 +233,7 @@ void FixtureModel(int num_teams) {
         possible_opponents.push_back(fixtures[d][team][other]);
         possible_opponents.push_back(fixtures[d][other][team]);
       }
-      builder.AddEquality(LinearExpr::BooleanSum(possible_opponents), 1);
+      builder.AddEquality(LinearExpr::Sum(possible_opponents), 1);
     }
   }
 
@@ -246,7 +245,7 @@ void FixtureModel(int num_teams) {
       for (int d = 0; d < num_days; ++d) {
         possible_days.push_back(fixtures[d][team][other]);
       }
-      builder.AddEquality(LinearExpr::BooleanSum(possible_days), 1);
+      builder.AddEquality(LinearExpr::Sum(possible_days), 1);
     }
   }
 
@@ -262,8 +261,8 @@ void FixtureModel(int num_teams) {
         second_half.push_back(fixtures[d + matches_per_day][team][other]);
         second_half.push_back(fixtures[d + matches_per_day][other][team]);
       }
-      builder.AddEquality(LinearExpr::BooleanSum(first_half), 1);
-      builder.AddEquality(LinearExpr::BooleanSum(second_half), 1);
+      builder.AddEquality(LinearExpr::Sum(first_half), 1);
+      builder.AddEquality(LinearExpr::Sum(second_half), 1);
     }
   }
 
@@ -273,8 +272,7 @@ void FixtureModel(int num_teams) {
       for (int other = 0; other < num_teams; ++other) {
         if (team == other) continue;
         builder.AddImplication(fixtures[d][team][other], at_home[d][team]);
-        builder.AddImplication(fixtures[d][team][other],
-                               Not(at_home[d][other]));
+        builder.AddImplication(fixtures[d][team][other], ~at_home[d][other]);
       }
     }
   }
@@ -284,8 +282,8 @@ void FixtureModel(int num_teams) {
     for (int d = 0; d < num_days - 2; ++d) {
       builder.AddBoolOr(
           {at_home[d][team], at_home[d + 1][team], at_home[d + 2][team]});
-      builder.AddBoolOr({Not(at_home[d][team]), Not(at_home[d + 1][team]),
-                         Not(at_home[d + 2][team])});
+      builder.AddBoolOr(
+          {~at_home[d][team], ~at_home[d + 1][team], ~at_home[d + 2][team]});
     }
   }
 
@@ -294,20 +292,17 @@ void FixtureModel(int num_teams) {
   for (int t = 0; t < num_teams; ++t) {
     for (int d = 0; d < num_days - 1; ++d) {
       BoolVar break_var = builder.NewBoolVar();
-      builder.AddBoolOr(
-          {Not(at_home[d][t]), Not(at_home[d + 1][t]), break_var});
+      builder.AddBoolOr({~at_home[d][t], ~at_home[d + 1][t], break_var});
       builder.AddBoolOr({at_home[d][t], at_home[d + 1][t], break_var});
-      builder.AddBoolOr(
-          {Not(at_home[d][t]), at_home[d + 1][t], Not(break_var)});
-      builder.AddBoolOr(
-          {at_home[d][t], Not(at_home[d + 1][t]), Not(break_var)});
+      builder.AddBoolOr({~at_home[d][t], at_home[d + 1][t], ~break_var});
+      builder.AddBoolOr({at_home[d][t], ~at_home[d + 1][t], ~break_var});
       breaks.push_back(break_var);
     }
   }
 
-  builder.AddGreaterOrEqual(LinearExpr::BooleanSum(breaks), 2 * num_teams - 4);
+  builder.AddGreaterOrEqual(LinearExpr::Sum(breaks), 2 * num_teams - 4);
 
-  builder.Minimize(LinearExpr::BooleanSum(breaks));
+  builder.Minimize(LinearExpr::Sum(breaks));
 
   Model model;
   if (!absl::GetFlag(FLAGS_params).empty()) {
@@ -326,9 +321,8 @@ static const char kUsage[] =
     "There is no output besides the LOGs of the solver.";
 
 int main(int argc, char** argv) {
-  absl::SetFlag(&FLAGS_logtostderr, true);
-  google::InitGoogleLogging(kUsage);
-  absl::ParseCommandLine(argc, argv);
+  absl::SetFlag(&FLAGS_stderrthreshold, 0);
+  InitGoogle(kUsage, &argc, &argv, true);
   CHECK_EQ(0, absl::GetFlag(FLAGS_num_teams) % 2)
       << "The number of teams must be even";
   CHECK_GE(absl::GetFlag(FLAGS_num_teams), 2) << "At least 2 teams";

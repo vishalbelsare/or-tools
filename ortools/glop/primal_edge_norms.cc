@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -13,8 +13,20 @@
 
 #include "ortools/glop/primal_edge_norms.h"
 
-#include "ortools/base/timer.h"
+#include <algorithm>
+#include <cstdlib>
+
+#include "absl/log/check.h"
+#include "ortools/base/logging.h"
+#include "ortools/glop/basis_representation.h"
+#include "ortools/glop/parameters.pb.h"
+#include "ortools/glop/update_row.h"
+#include "ortools/glop/variables_info.h"
+#include "ortools/lp_data/lp_types.h"
 #include "ortools/lp_data/lp_utils.h"
+#include "ortools/lp_data/scattered_vector.h"
+#include "ortools/lp_data/sparse.h"
+#include "ortools/util/stats.h"
 
 namespace operations_research {
 namespace glop {
@@ -36,6 +48,7 @@ PrimalEdgeNorms::PrimalEdgeNorms(const CompactSparseMatrix& compact_matrix,
 
 void PrimalEdgeNorms::Clear() {
   SCOPED_TIME_STAT(&stats_);
+  matrix_column_norms_.clear();
   recompute_edge_squared_norms_ = true;
   reset_devex_weights_ = true;
   for (bool* watcher : watchers_) *watcher = true;
@@ -46,14 +59,14 @@ bool PrimalEdgeNorms::NeedsBasisRefactorization() const {
   return recompute_edge_squared_norms_;
 }
 
-const DenseRow& PrimalEdgeNorms::GetSquaredNorms() {
+DenseRow::ConstView PrimalEdgeNorms::GetSquaredNorms() {
   switch (pricing_rule_) {
     case GlopParameters::DANTZIG:
-      return GetMatrixColumnNorms();
+      return GetMatrixColumnNorms().const_view();
     case GlopParameters::STEEPEST_EDGE:
-      return GetEdgeSquaredNorms();
+      return GetEdgeSquaredNorms().const_view();
     case GlopParameters::DEVEX:
-      return GetDevexWeights();
+      return GetDevexWeights().const_view();
   }
 }
 
@@ -72,15 +85,14 @@ const DenseRow& PrimalEdgeNorms::GetMatrixColumnNorms() {
   return matrix_column_norms_;
 }
 
-void PrimalEdgeNorms::TestEnteringEdgeNormPrecision(
+bool PrimalEdgeNorms::TestEnteringEdgeNormPrecision(
     ColIndex entering_col, const ScatteredColumn& direction) {
   if (!recompute_edge_squared_norms_) {
     SCOPED_TIME_STAT(&stats_);
     // Recompute the squared norm of the edge used during this
-    // iteration, i.e. the entering edge. Note the PreciseSquaredNorm()
-    // since it is a small price to pay for an increased precision.
+    // iteration, i.e. the entering edge.
     const Fractional old_squared_norm = edge_squared_norms_[entering_col];
-    const Fractional precise_squared_norm = 1.0 + PreciseSquaredNorm(direction);
+    const Fractional precise_squared_norm = 1.0 + SquaredNorm(direction);
     edge_squared_norms_[entering_col] = precise_squared_norm;
 
     const Fractional precise_norm = sqrt(precise_squared_norm);
@@ -94,7 +106,14 @@ void PrimalEdgeNorms::TestEnteringEdgeNormPrecision(
       recompute_edge_squared_norms_ = true;
       for (bool* watcher : watchers_) *watcher = true;
     }
+
+    if (old_squared_norm < 0.25 * precise_squared_norm) {
+      VLOG(1) << "Imprecise norm, reprice. old=" << old_squared_norm
+              << " new=" << precise_squared_norm;
+      return false;
+    }
   }
+  return true;
 }
 
 void PrimalEdgeNorms::UpdateBeforeBasisPivot(ColIndex entering_col,
@@ -216,16 +235,20 @@ void PrimalEdgeNorms::UpdateEdgeSquaredNorms(ColIndex entering_col,
 
   int stat_lower_bounded_norms = 0;
   const Fractional factor = 2.0 / pivot;
+  const auto view = compact_matrix_.view();
+  auto output = edge_squared_norms_.view();
+  const auto direction_left_inverse =
+      direction_left_inverse_.values.const_view();
   for (const ColIndex col : update_row.GetNonZeroPositions()) {
     const Fractional coeff = update_row.GetCoefficient(col);
-    const Fractional scalar_product = compact_matrix_.ColumnScalarProduct(
-        col, direction_left_inverse_.values);
-    num_operations_ += compact_matrix_.column(col).num_entries().value();
+    const Fractional scalar_product =
+        view.ColumnScalarProduct(col, direction_left_inverse);
+    num_operations_ += view.ColumnNumEntries(col).value();
 
     // Update the edge squared norm of this column. Note that the update
     // formula used is important to maximize the precision. See an explanation
     // in the dual context in Koberstein's PhD thesis, section 8.2.2.1.
-    edge_squared_norms_[col] +=
+    output[col] +=
         coeff * (coeff * leaving_squared_norm + factor * scalar_product);
 
     // Make sure it doesn't go under a known lower bound (TODO(user): ref?).
@@ -234,12 +257,12 @@ void PrimalEdgeNorms::UpdateEdgeSquaredNorms(ColIndex entering_col,
     // slightly faster, but may introduce numerical issues. More generally,
     // this test is only needed in a few cases, so is it worth it?
     const Fractional lower_bound = 1.0 + Square(coeff / pivot);
-    if (edge_squared_norms_[col] < lower_bound) {
-      edge_squared_norms_[col] = lower_bound;
+    if (output[col] < lower_bound) {
+      output[col] = lower_bound;
       ++stat_lower_bounded_norms;
     }
   }
-  edge_squared_norms_[leaving_col] = leaving_squared_norm;
+  output[leaving_col] = leaving_squared_norm;
   stats_.lower_bounded_norms.Add(stat_lower_bounded_norms);
 }
 

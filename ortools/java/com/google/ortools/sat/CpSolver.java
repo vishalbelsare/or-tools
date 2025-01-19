@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -30,12 +30,13 @@ public final class CpSolver {
   public CpSolver() {
     this.solveParameters = SatParameters.newBuilder();
     this.logCallback = null;
+    this.bestBoundCallback = null;
     this.solveWrapper = null;
   }
 
   /** Solves the given model, and returns the solve status. */
   public CpSolverStatus solve(CpModel model) {
-    return solveWithSolutionCallback(model, null);
+    return solve(model, null);
   }
 
   /**
@@ -51,6 +52,9 @@ public final class CpSolver {
     }
     if (logCallback != null) {
       solveWrapper.addLogCallback(logCallback);
+    }
+    if (bestBoundCallback != null) {
+      solveWrapper.addBestBoundCallback(bestBoundCallback);
     }
 
     solveResponse = solveWrapper.solve(model.model());
@@ -93,9 +97,9 @@ public final class CpSolver {
   public CpSolverStatus searchAllSolutions(CpModel model, CpSolverSolutionCallback cb) {
     boolean oldValue = solveParameters.getEnumerateAllSolutions();
     solveParameters.setEnumerateAllSolutions(true);
-    solve(model, cb);
+    CpSolverStatus status = solve(model, cb);
     solveParameters.setEnumerateAllSolutions(oldValue);
-    return solveResponse.getStatus();
+    return status;
   }
 
   private synchronized void createSolveWrapper() {
@@ -126,9 +130,14 @@ public final class CpSolver {
     return solveResponse.getBestObjectiveBound();
   }
 
-  /** Returns the value of a variable in the last solution found. */
-  public long value(IntVar var) {
-    return solveResponse.getSolution(var.getIndex());
+  /** Returns the value of a linear expression in the last solution found. */
+  public long value(LinearArgument expr) {
+    final LinearExpr e = expr.build();
+    long result = e.getOffset();
+    for (int i = 0; i < e.numElements(); ++i) {
+      result += solveResponse.getSolution(e.getVariableIndex(i)) * e.getCoefficient(i);
+    }
+    return result;
   }
 
   /** Returns the Boolean value of a literal in the last solution found. */
@@ -180,13 +189,37 @@ public final class CpSolver {
     this.logCallback = cb;
   }
 
+  /** Clears the log callback. */
+  public void clearLogCallback() {
+    this.logCallback = null;
+  }
+
+  /** Sets the best bound callback for the solver. */
+  public void setBestBoundCallback(Consumer<Double> cb) {
+    this.bestBoundCallback = cb;
+  }
+
+  /** Clears the best bound callback. */
+  public void clearBestBoundCallback() {
+    this.bestBoundCallback = null;
+  }
+
   /** Returns some statistics on the solution found as a string. */
   public String responseStats() {
     return CpSatHelper.solverResponseStats(solveResponse);
   }
 
+  /**
+   * Returns some information on how the solution was found, or the reason why the model or the
+   * parameters are invalid.
+   */
+  public String getSolutionInfo() {
+    return solveResponse.getSolutionInfo();
+  }
+
   private CpSolverResponse solveResponse;
   private final SatParameters.Builder solveParameters;
   private Consumer<String> logCallback;
+  private Consumer<Double> bestBoundCallback;
   private SolveWrapper solveWrapper;
 }

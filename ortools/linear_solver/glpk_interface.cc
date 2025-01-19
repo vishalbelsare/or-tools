@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -11,10 +11,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//
-
 #if defined(USE_GLPK)
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -24,11 +23,11 @@
 #include <utility>
 #include <vector>
 
+#include "absl/base/attributes.h"
 #include "absl/memory/memory.h"
 #include "absl/strings/str_format.h"
 #include "ortools/base/commandlineflags.h"
 #include "ortools/base/hash.h"
-#include "ortools/base/integral_types.h"
 #include "ortools/base/logging.h"
 #include "ortools/base/timer.h"
 #include "ortools/glpk/glpk_env_deleter.h"
@@ -95,7 +94,7 @@ int MPSolverIndexToGlpkIndex(int index) { return index + 1; }
 class GLPKInterface : public MPSolverInterface {
  public:
   // Constructor that takes a name for the underlying glpk solver.
-  GLPKInterface(MPSolver* const solver, bool mip);
+  GLPKInterface(MPSolver* solver, bool mip);
   ~GLPKInterface() override;
 
   // Sets the optimization direction (min/max).
@@ -116,17 +115,16 @@ class GLPKInterface : public MPSolverInterface {
                            double ub) override;
 
   // Add Constraint incrementally.
-  void AddRowConstraint(MPConstraint* const ct) override;
+  void AddRowConstraint(MPConstraint* ct) override;
   // Add variable incrementally.
-  void AddVariable(MPVariable* const var) override;
+  void AddVariable(MPVariable* var) override;
   // Change a coefficient in a constraint.
-  void SetCoefficient(MPConstraint* const constraint,
-                      const MPVariable* const variable, double new_value,
-                      double old_value) override;
+  void SetCoefficient(MPConstraint* constraint, const MPVariable* variable,
+                      double new_value, double old_value) override;
   // Clear a constraint from all its terms.
-  void ClearConstraint(MPConstraint* const constraint) override;
+  void ClearConstraint(MPConstraint* constraint) override;
   // Change a coefficient in the linear objective
-  void SetObjectiveCoefficient(const MPVariable* const variable,
+  void SetObjectiveCoefficient(const MPVariable* variable,
                                double coefficient) override;
   // Change the constant term in the linear objective.
   void SetObjectiveOffset(double value) override;
@@ -180,8 +178,8 @@ class GLPKInterface : public MPSolverInterface {
   void SetLpAlgorithm(int value) override;
 
   void ExtractOldConstraints();
-  void ExtractOneConstraint(MPConstraint* const constraint, int* const indices,
-                            double* const coefs);
+  void ExtractOneConstraint(MPConstraint* constraint, int* indices,
+                            double* coefs);
   // Transforms basis status from GLPK integer code to MPSolver::BasisStatus.
   MPSolver::BasisStatus TransformGLPKBasisStatus(int glpk_basis_status) const;
 
@@ -218,7 +216,7 @@ GLPKInterface::GLPKInterface(MPSolver* const solver, bool mip)
   lp_ = glp_create_prob();
   glp_set_prob_name(lp_, solver_->name_.c_str());
   glp_set_obj_dir(lp_, GLP_MIN);
-  mip_callback_info_ = absl::make_unique<GLPKInformation>(maximize_);
+  mip_callback_info_ = std::make_unique<GLPKInformation>(maximize_);
 }
 
 // Frees the LP memory allocations.

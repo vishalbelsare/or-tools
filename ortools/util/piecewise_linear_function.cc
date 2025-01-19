@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -14,12 +14,16 @@
 #include "ortools/util/piecewise_linear_function.h"
 
 #include <algorithm>
+#include <functional>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include "absl/container/btree_set.h"
 #include "absl/strings/str_format.h"
 #include "ortools/base/logging.h"
+#include "ortools/util/saturated_arithmetic.h"
 
 namespace operations_research {
 namespace {
@@ -708,7 +712,7 @@ void PiecewiseLinearFunction::Operation(
   const std::vector<PiecewiseSegment>& other_segments = other.segments();
   own_segments.swap(segments_);
 
-  std::set<int64_t> start_x_points;
+  absl::btree_set<int64_t> start_x_points;
   for (int i = 0; i < own_segments.size(); ++i) {
     start_x_points.insert(own_segments[i].start_x());
   }

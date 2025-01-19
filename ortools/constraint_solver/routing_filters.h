@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -14,15 +14,20 @@
 #ifndef OR_TOOLS_CONSTRAINT_SOLVER_ROUTING_FILTERS_H_
 #define OR_TOOLS_CONSTRAINT_SOLVER_ROUTING_FILTERS_H_
 
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <string>
 #include <utility>
 #include <vector>
 
-#include "ortools/base/integral_types.h"
+#include "absl/strings/string_view.h"
 #include "ortools/constraint_solver/constraint_solver.h"
 #include "ortools/constraint_solver/constraint_solveri.h"
 #include "ortools/constraint_solver/routing.h"
 #include "ortools/constraint_solver/routing_lp_scheduling.h"
 #include "ortools/constraint_solver/routing_parameters.pb.h"
+#include "ortools/constraint_solver/routing_types.h"
 #include "ortools/util/bitset.h"
 
 namespace operations_research {
@@ -33,7 +38,7 @@ IntVarLocalSearchFilter* MakeMaxActiveVehiclesFilter(
 
 /// Returns a filter ensuring that node disjunction constraints are enforced.
 IntVarLocalSearchFilter* MakeNodeDisjunctionFilter(
-    const RoutingModel& routing_model);
+    const RoutingModel& routing_model, bool filter_cost);
 
 /// Returns a filter computing vehicle amortized costs.
 IntVarLocalSearchFilter* MakeVehicleAmortizedCostFilter(
@@ -46,7 +51,8 @@ IntVarLocalSearchFilter* MakeTypeRegulationsFilter(
 /// Returns a filter enforcing pickup and delivery constraints for the given
 /// pair of nodes and given policies.
 IntVarLocalSearchFilter* MakePickupDeliveryFilter(
-    const RoutingModel& routing_model, const RoutingModel::IndexPairs& pairs,
+    const RoutingModel& routing_model,
+    const std::vector<PickupDeliveryPair>& pairs,
     const std::vector<RoutingModel::PickupAndDeliveryPolicy>& vehicle_policies);
 
 /// Returns a filter checking that vehicle variable domains are respected.
@@ -54,11 +60,10 @@ IntVarLocalSearchFilter* MakeVehicleVarFilter(
     const RoutingModel& routing_model);
 
 /// Returns a filter handling dimension costs and constraints.
-IntVarLocalSearchFilter* MakePathCumulFilter(
-    const RoutingDimension& dimension,
-    const RoutingSearchParameters& parameters,
-    bool propagate_own_objective_value, bool filter_objective_cost,
-    bool can_use_lp = true);
+IntVarLocalSearchFilter* MakePathCumulFilter(const RoutingDimension& dimension,
+                                             bool propagate_own_objective_value,
+                                             bool filter_objective_cost,
+                                             bool can_use_lp);
 
 /// Returns a filter handling dimension cumul bounds.
 IntVarLocalSearchFilter* MakeCumulBoundsPropagatorFilter(
@@ -69,8 +74,51 @@ IntVarLocalSearchFilter* MakeGlobalLPCumulFilter(
     GlobalDimensionCumulOptimizer* optimizer,
     GlobalDimensionCumulOptimizer* mp_optimizer, bool filter_objective_cost);
 
+/// Returns a filter checking the feasibility and cost of the resource
+/// assignment.
+LocalSearchFilter* MakeResourceAssignmentFilter(
+    LocalDimensionCumulOptimizer* optimizer,
+    LocalDimensionCumulOptimizer* mp_optimizer,
+    bool propagate_own_objective_value, bool filter_objective_cost);
+
 /// Returns a filter checking the current solution using CP propagation.
 IntVarLocalSearchFilter* MakeCPFeasibilityFilter(RoutingModel* routing_model);
+
+class PathEnergyCostChecker {
+ public:
+  PathEnergyCostChecker(
+      const PathState* path_state, std::vector<int> force_class,
+      std::vector<const std::function<int64_t(int64_t)>*> force_per_class,
+      std::vector<int> distance_class,
+      std::vector<const std::function<int64_t(int64_t, int64_t)>*>
+          distance_per_class,
+      std::vector<int64_t> path_unit_costs,
+      std::vector<bool> path_has_cost_when_empty);
+  bool Check();
+  void Commit();
+  int64_t CommittedCost() const { return committed_total_cost_; }
+  int64_t AcceptedCost() const { return accepted_total_cost_; }
+
+ private:
+  int64_t ComputePathCost(int64_t path_start) const;
+  const PathState* const path_state_;
+  const std::vector<int> force_class_;
+  const std::vector<int> distance_class_;
+  const std::vector<const std::function<int64_t(int64_t)>*> force_per_class_;
+  const std::vector<const std::function<int64_t(int64_t, int64_t)>*>
+      distance_per_class_;
+  const std::vector<int64_t> path_unit_costs_;
+  const std::vector<bool> path_has_cost_when_empty_;
+
+  // Incremental cost computation.
+  int64_t committed_total_cost_;
+  int64_t accepted_total_cost_;
+  std::vector<int64_t> committed_path_cost_;
+};
+
+LocalSearchFilter* MakePathEnergyCostFilter(
+    Solver* solver, std::unique_ptr<PathEnergyCostChecker> checker,
+    absl::string_view dimension_name);
 
 /// Appends dimension-based filters to the given list of filters using a path
 /// state.
@@ -82,6 +130,7 @@ void AppendLightWeightDimensionFilters(
 void AppendDimensionCumulFilters(
     const std::vector<RoutingDimension*>& dimensions,
     const RoutingSearchParameters& parameters, bool filter_objective_cost,
+    bool use_chain_cumul_filter,
     std::vector<LocalSearchFilterManager::FilterEvent>* filters);
 
 /// Generic path-based filter class.
@@ -110,9 +159,12 @@ class BasePathFilter : public IntVarLocalSearchFilter {
   const std::vector<int64_t>& GetTouchedPathStarts() const {
     return touched_paths_.PositionsSetAtLeastOnce();
   }
+  bool PathStartTouched(int64_t start) const { return touched_paths_[start]; }
   const std::vector<int64_t>& GetNewSynchronizedUnperformedNodes() const {
     return new_synchronized_unperformed_nodes_.PositionsSetAtLeastOnce();
   }
+
+  bool lns_detected() const { return lns_detected_; }
 
  private:
   enum Status { UNKNOWN, ENABLED, DISABLED };
@@ -120,15 +172,11 @@ class BasePathFilter : public IntVarLocalSearchFilter {
   virtual bool DisableFiltering() const { return false; }
   virtual void OnBeforeSynchronizePaths() {}
   virtual void OnAfterSynchronizePaths() {}
-  virtual void OnSynchronizePathFromStart(int64_t start) {}
-  virtual void InitializeAcceptPath() {}
+  virtual void OnSynchronizePathFromStart(int64_t) {}
+  virtual bool InitializeAcceptPath() { return true; }
   virtual bool AcceptPath(int64_t path_start, int64_t chain_start,
                           int64_t chain_end) = 0;
-  virtual bool FinalizeAcceptPath(const Assignment* delta,
-                                  int64_t objective_min,
-                                  int64_t objective_max) {
-    return true;
-  }
+  virtual bool FinalizeAcceptPath(int64_t, int64_t) { return true; }
   /// Detects path starts, used to track which node belongs to which path.
   void ComputePathStarts(std::vector<int64_t>* path_starts,
                          std::vector<int>* index_to_path);
@@ -150,6 +198,7 @@ class BasePathFilter : public IntVarLocalSearchFilter {
   std::vector<int> ranks_;
 
   Status status_;
+  bool lns_detected_;
 };
 
 }  // namespace operations_research

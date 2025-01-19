@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -14,10 +14,27 @@
 #include "ortools/sat/cp_model_utils.h"
 
 #include <cstdint>
+#include <cstdlib>
 #include <functional>
+#include <numeric>
+#include <string>
+#include <utility>
+#include <vector>
 
+#include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
+#include "absl/log/check.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
+#include "absl/types/span.h"
+#include "google/protobuf/descriptor.h"
+#include "google/protobuf/message.h"
+#include "google/protobuf/text_format.h"
 #include "ortools/base/stl_util.h"
 #include "ortools/sat/cp_model.pb.h"
+#include "ortools/sat/sat_base.h"
+#include "ortools/util/saturated_arithmetic.h"
+#include "ortools/util/sorted_interval_list.h"
 
 namespace operations_research {
 namespace sat {
@@ -31,6 +48,26 @@ void AddIndices(const IntList& indices, std::vector<int>* output) {
 
 }  // namespace
 
+int64_t LinearExpressionGcd(const LinearExpressionProto& expr, int64_t gcd) {
+  gcd = std::gcd(gcd, std::abs(expr.offset()));
+  for (const int64_t coeff : expr.coeffs()) {
+    gcd = std::gcd(gcd, std::abs(coeff));
+  }
+  return gcd;
+}
+
+void DivideLinearExpression(int64_t divisor, LinearExpressionProto* expr) {
+  CHECK_NE(divisor, 0);
+  if (divisor == 1) return;
+
+  DCHECK_EQ(expr->offset() % divisor, 0);
+  expr->set_offset(expr->offset() / divisor);
+  for (int i = 0; i < expr->vars_size(); ++i) {
+    DCHECK_EQ(expr->coeffs(i) % divisor, 0);
+    expr->set_coeffs(i, expr->coeffs(i) / divisor);
+  }
+}
+
 void SetToNegatedLinearExpression(const LinearExpressionProto& input_expr,
                                   LinearExpressionProto* output_negated_expr) {
   output_negated_expr->Clear();
@@ -43,122 +80,116 @@ void SetToNegatedLinearExpression(const LinearExpressionProto& input_expr,
 
 IndexReferences GetReferencesUsedByConstraint(const ConstraintProto& ct) {
   IndexReferences output;
+  GetReferencesUsedByConstraint(ct, &output.variables, &output.literals);
+  return output;
+}
+
+void GetReferencesUsedByConstraint(const ConstraintProto& ct,
+                                   std::vector<int>* variables,
+                                   std::vector<int>* literals) {
+  variables->clear();
+  literals->clear();
   switch (ct.constraint_case()) {
     case ConstraintProto::ConstraintCase::kBoolOr:
-      AddIndices(ct.bool_or().literals(), &output.literals);
+      AddIndices(ct.bool_or().literals(), literals);
       break;
     case ConstraintProto::ConstraintCase::kBoolAnd:
-      AddIndices(ct.bool_and().literals(), &output.literals);
+      AddIndices(ct.bool_and().literals(), literals);
       break;
     case ConstraintProto::ConstraintCase::kAtMostOne:
-      AddIndices(ct.at_most_one().literals(), &output.literals);
+      AddIndices(ct.at_most_one().literals(), literals);
       break;
     case ConstraintProto::ConstraintCase::kExactlyOne:
-      AddIndices(ct.exactly_one().literals(), &output.literals);
+      AddIndices(ct.exactly_one().literals(), literals);
       break;
     case ConstraintProto::ConstraintCase::kBoolXor:
-      AddIndices(ct.bool_xor().literals(), &output.literals);
+      AddIndices(ct.bool_xor().literals(), literals);
       break;
     case ConstraintProto::ConstraintCase::kIntDiv:
-      output.variables.push_back(ct.int_div().target());
-      AddIndices(ct.int_div().vars(), &output.variables);
-      break;
-    case ConstraintProto::ConstraintCase::kIntMod:
-      output.variables.push_back(ct.int_mod().target());
-      AddIndices(ct.int_mod().vars(), &output.variables);
-      break;
-    case ConstraintProto::ConstraintCase::kIntMax:
-      output.variables.push_back(ct.int_max().target());
-      AddIndices(ct.int_max().vars(), &output.variables);
-      break;
-    case ConstraintProto::ConstraintCase::kLinMax: {
-      AddIndices(ct.lin_max().target().vars(), &output.variables);
-      for (int i = 0; i < ct.lin_max().exprs_size(); ++i) {
-        AddIndices(ct.lin_max().exprs(i).vars(), &output.variables);
+      AddIndices(ct.int_div().target().vars(), variables);
+      for (const LinearExpressionProto& expr : ct.int_div().exprs()) {
+        AddIndices(expr.vars(), variables);
       }
       break;
-    }
-    case ConstraintProto::ConstraintCase::kIntMin:
-      output.variables.push_back(ct.int_min().target());
-      AddIndices(ct.int_min().vars(), &output.variables);
+    case ConstraintProto::ConstraintCase::kIntMod:
+      AddIndices(ct.int_mod().target().vars(), variables);
+      for (const LinearExpressionProto& expr : ct.int_mod().exprs()) {
+        AddIndices(expr.vars(), variables);
+      }
       break;
-    case ConstraintProto::ConstraintCase::kLinMin: {
-      AddIndices(ct.lin_min().target().vars(), &output.variables);
-      for (int i = 0; i < ct.lin_min().exprs_size(); ++i) {
-        AddIndices(ct.lin_min().exprs(i).vars(), &output.variables);
+    case ConstraintProto::ConstraintCase::kLinMax: {
+      AddIndices(ct.lin_max().target().vars(), variables);
+      for (const LinearExpressionProto& expr : ct.lin_max().exprs()) {
+        AddIndices(expr.vars(), variables);
       }
       break;
     }
     case ConstraintProto::ConstraintCase::kIntProd:
-      output.variables.push_back(ct.int_prod().target());
-      AddIndices(ct.int_prod().vars(), &output.variables);
+      AddIndices(ct.int_prod().target().vars(), variables);
+      for (const LinearExpressionProto& expr : ct.int_prod().exprs()) {
+        AddIndices(expr.vars(), variables);
+      }
       break;
     case ConstraintProto::ConstraintCase::kLinear:
-      AddIndices(ct.linear().vars(), &output.variables);
+      AddIndices(ct.linear().vars(), variables);
       break;
     case ConstraintProto::ConstraintCase::kAllDiff:
-      AddIndices(ct.all_diff().vars(), &output.variables);
+      for (const LinearExpressionProto& expr : ct.all_diff().exprs()) {
+        AddIndices(expr.vars(), variables);
+      }
       break;
     case ConstraintProto::ConstraintCase::kDummyConstraint:
-      AddIndices(ct.dummy_constraint().vars(), &output.variables);
+      AddIndices(ct.dummy_constraint().vars(), variables);
       break;
     case ConstraintProto::ConstraintCase::kElement:
-      output.variables.push_back(ct.element().index());
-      output.variables.push_back(ct.element().target());
-      AddIndices(ct.element().vars(), &output.variables);
+      variables->push_back(ct.element().index());
+      variables->push_back(ct.element().target());
+      AddIndices(ct.element().vars(), variables);
       break;
     case ConstraintProto::ConstraintCase::kCircuit:
-      AddIndices(ct.circuit().literals(), &output.literals);
+      AddIndices(ct.circuit().literals(), literals);
       break;
     case ConstraintProto::ConstraintCase::kRoutes:
-      AddIndices(ct.routes().literals(), &output.literals);
+      AddIndices(ct.routes().literals(), literals);
       break;
     case ConstraintProto::ConstraintCase::kInverse:
-      AddIndices(ct.inverse().f_direct(), &output.variables);
-      AddIndices(ct.inverse().f_inverse(), &output.variables);
+      AddIndices(ct.inverse().f_direct(), variables);
+      AddIndices(ct.inverse().f_inverse(), variables);
       break;
     case ConstraintProto::ConstraintCase::kReservoir:
-      AddIndices(ct.reservoir().times(), &output.variables);
-      AddIndices(ct.reservoir().actives(), &output.literals);
+      for (const LinearExpressionProto& time : ct.reservoir().time_exprs()) {
+        AddIndices(time.vars(), variables);
+      }
+      for (const LinearExpressionProto& level :
+           ct.reservoir().level_changes()) {
+        AddIndices(level.vars(), variables);
+      }
+      AddIndices(ct.reservoir().active_literals(), literals);
       break;
     case ConstraintProto::ConstraintCase::kTable:
-      AddIndices(ct.table().vars(), &output.variables);
+      AddIndices(ct.table().vars(), variables);
       break;
     case ConstraintProto::ConstraintCase::kAutomaton:
-      AddIndices(ct.automaton().vars(), &output.variables);
+      AddIndices(ct.automaton().vars(), variables);
       break;
     case ConstraintProto::ConstraintCase::kInterval:
-      if (ct.interval().has_start_view()) {
-        AddIndices(ct.interval().start_view().vars(), &output.variables);
-      } else {
-        output.variables.push_back(ct.interval().start());
-      }
-      if (ct.interval().has_size_view()) {
-        AddIndices(ct.interval().size_view().vars(), &output.variables);
-      } else {
-        output.variables.push_back(ct.interval().size());
-      }
-      if (ct.interval().has_end_view()) {
-        AddIndices(ct.interval().end_view().vars(), &output.variables);
-      } else {
-        output.variables.push_back(ct.interval().end());
-      }
+      AddIndices(ct.interval().start().vars(), variables);
+      AddIndices(ct.interval().size().vars(), variables);
+      AddIndices(ct.interval().end().vars(), variables);
       break;
     case ConstraintProto::ConstraintCase::kNoOverlap:
       break;
     case ConstraintProto::ConstraintCase::kNoOverlap2D:
       break;
     case ConstraintProto::ConstraintCase::kCumulative:
-      output.variables.push_back(ct.cumulative().capacity());
-      AddIndices(ct.cumulative().demands(), &output.variables);
-      for (const LinearExpressionProto& lin : ct.cumulative().energies()) {
-        AddIndices(lin.vars(), &output.variables);
+      AddIndices(ct.cumulative().capacity().vars(), variables);
+      for (const LinearExpressionProto& demand : ct.cumulative().demands()) {
+        AddIndices(demand.vars(), variables);
       }
       break;
     case ConstraintProto::ConstraintCase::CONSTRAINT_NOT_SET:
       break;
   }
-  return output;
 }
 
 #define APPLY_TO_SINGULAR_FIELD(ct_name, field_name)  \
@@ -196,13 +227,7 @@ void ApplyToAllLiteralIndices(const std::function<void(int*)>& f,
       break;
     case ConstraintProto::ConstraintCase::kIntMod:
       break;
-    case ConstraintProto::ConstraintCase::kIntMax:
-      break;
     case ConstraintProto::ConstraintCase::kLinMax:
-      break;
-    case ConstraintProto::ConstraintCase::kIntMin:
-      break;
-    case ConstraintProto::ConstraintCase::kLinMin:
       break;
     case ConstraintProto::ConstraintCase::kIntProd:
       break;
@@ -223,7 +248,7 @@ void ApplyToAllLiteralIndices(const std::function<void(int*)>& f,
     case ConstraintProto::ConstraintCase::kInverse:
       break;
     case ConstraintProto::ConstraintCase::kReservoir:
-      APPLY_TO_REPEATED_FIELD(reservoir, actives);
+      APPLY_TO_REPEATED_FIELD(reservoir, active_literals);
       break;
     case ConstraintProto::ConstraintCase::kTable:
       break;
@@ -256,16 +281,16 @@ void ApplyToAllVariableIndices(const std::function<void(int*)>& f,
     case ConstraintProto::ConstraintCase::kBoolXor:
       break;
     case ConstraintProto::ConstraintCase::kIntDiv:
-      APPLY_TO_SINGULAR_FIELD(int_div, target);
-      APPLY_TO_REPEATED_FIELD(int_div, vars);
+      APPLY_TO_REPEATED_FIELD(int_div, target()->mutable_vars);
+      for (int i = 0; i < ct->int_div().exprs_size(); ++i) {
+        APPLY_TO_REPEATED_FIELD(int_div, exprs(i)->mutable_vars);
+      }
       break;
     case ConstraintProto::ConstraintCase::kIntMod:
-      APPLY_TO_SINGULAR_FIELD(int_mod, target);
-      APPLY_TO_REPEATED_FIELD(int_mod, vars);
-      break;
-    case ConstraintProto::ConstraintCase::kIntMax:
-      APPLY_TO_SINGULAR_FIELD(int_max, target);
-      APPLY_TO_REPEATED_FIELD(int_max, vars);
+      APPLY_TO_REPEATED_FIELD(int_mod, target()->mutable_vars);
+      for (int i = 0; i < ct->int_mod().exprs_size(); ++i) {
+        APPLY_TO_REPEATED_FIELD(int_mod, exprs(i)->mutable_vars);
+      }
       break;
     case ConstraintProto::ConstraintCase::kLinMax:
       APPLY_TO_REPEATED_FIELD(lin_max, target()->mutable_vars);
@@ -273,25 +298,19 @@ void ApplyToAllVariableIndices(const std::function<void(int*)>& f,
         APPLY_TO_REPEATED_FIELD(lin_max, exprs(i)->mutable_vars);
       }
       break;
-    case ConstraintProto::ConstraintCase::kIntMin:
-      APPLY_TO_SINGULAR_FIELD(int_min, target);
-      APPLY_TO_REPEATED_FIELD(int_min, vars);
-      break;
-    case ConstraintProto::ConstraintCase::kLinMin:
-      APPLY_TO_REPEATED_FIELD(lin_min, target()->mutable_vars);
-      for (int i = 0; i < ct->lin_min().exprs_size(); ++i) {
-        APPLY_TO_REPEATED_FIELD(lin_min, exprs(i)->mutable_vars);
-      }
-      break;
     case ConstraintProto::ConstraintCase::kIntProd:
-      APPLY_TO_SINGULAR_FIELD(int_prod, target);
-      APPLY_TO_REPEATED_FIELD(int_prod, vars);
+      APPLY_TO_REPEATED_FIELD(int_prod, target()->mutable_vars);
+      for (int i = 0; i < ct->int_prod().exprs_size(); ++i) {
+        APPLY_TO_REPEATED_FIELD(int_prod, exprs(i)->mutable_vars);
+      }
       break;
     case ConstraintProto::ConstraintCase::kLinear:
       APPLY_TO_REPEATED_FIELD(linear, vars);
       break;
     case ConstraintProto::ConstraintCase::kAllDiff:
-      APPLY_TO_REPEATED_FIELD(all_diff, vars);
+      for (int i = 0; i < ct->all_diff().exprs_size(); ++i) {
+        APPLY_TO_REPEATED_FIELD(all_diff, exprs(i)->mutable_vars);
+      }
       break;
     case ConstraintProto::ConstraintCase::kDummyConstraint:
       APPLY_TO_REPEATED_FIELD(dummy_constraint, vars);
@@ -310,7 +329,12 @@ void ApplyToAllVariableIndices(const std::function<void(int*)>& f,
       APPLY_TO_REPEATED_FIELD(inverse, f_inverse);
       break;
     case ConstraintProto::ConstraintCase::kReservoir:
-      APPLY_TO_REPEATED_FIELD(reservoir, times);
+      for (int i = 0; i < ct->reservoir().time_exprs_size(); ++i) {
+        APPLY_TO_REPEATED_FIELD(reservoir, time_exprs(i)->mutable_vars);
+      }
+      for (int i = 0; i < ct->reservoir().level_changes_size(); ++i) {
+        APPLY_TO_REPEATED_FIELD(reservoir, level_changes(i)->mutable_vars);
+      }
       break;
     case ConstraintProto::ConstraintCase::kTable:
       APPLY_TO_REPEATED_FIELD(table, vars);
@@ -319,32 +343,19 @@ void ApplyToAllVariableIndices(const std::function<void(int*)>& f,
       APPLY_TO_REPEATED_FIELD(automaton, vars);
       break;
     case ConstraintProto::ConstraintCase::kInterval:
-      if (ct->interval().has_start_view()) {
-        APPLY_TO_REPEATED_FIELD(interval, start_view()->mutable_vars);
-      } else {
-        APPLY_TO_SINGULAR_FIELD(interval, start);
-      }
-      if (ct->interval().has_size_view()) {
-        APPLY_TO_REPEATED_FIELD(interval, size_view()->mutable_vars);
-      } else {
-        APPLY_TO_SINGULAR_FIELD(interval, size);
-      }
-      if (ct->interval().has_end_view()) {
-        APPLY_TO_REPEATED_FIELD(interval, end_view()->mutable_vars);
-      } else {
-        APPLY_TO_SINGULAR_FIELD(interval, end);
-      }
+      APPLY_TO_REPEATED_FIELD(interval, start()->mutable_vars);
+      APPLY_TO_REPEATED_FIELD(interval, size()->mutable_vars);
+      APPLY_TO_REPEATED_FIELD(interval, end()->mutable_vars);
       break;
     case ConstraintProto::ConstraintCase::kNoOverlap:
       break;
     case ConstraintProto::ConstraintCase::kNoOverlap2D:
       break;
     case ConstraintProto::ConstraintCase::kCumulative:
-      APPLY_TO_SINGULAR_FIELD(cumulative, capacity);
-      APPLY_TO_REPEATED_FIELD(cumulative, demands);
-      for (int i = 0; i < ct->cumulative().energies_size(); ++i) {
+      APPLY_TO_REPEATED_FIELD(cumulative, capacity()->mutable_vars);
+      for (int i = 0; i < ct->cumulative().demands_size(); ++i) {
         for (int& r :
-             *ct->mutable_cumulative()->mutable_energies(i)->mutable_vars()) {
+             *ct->mutable_cumulative()->mutable_demands(i)->mutable_vars()) {
           f(&r);
         }
       }
@@ -371,13 +382,7 @@ void ApplyToAllIntervalIndices(const std::function<void(int*)>& f,
       break;
     case ConstraintProto::ConstraintCase::kIntMod:
       break;
-    case ConstraintProto::ConstraintCase::kIntMax:
-      break;
     case ConstraintProto::ConstraintCase::kLinMax:
-      break;
-    case ConstraintProto::ConstraintCase::kIntMin:
-      break;
-    case ConstraintProto::ConstraintCase::kLinMin:
       break;
     case ConstraintProto::ConstraintCase::kIntProd:
       break;
@@ -421,7 +426,7 @@ void ApplyToAllIntervalIndices(const std::function<void(int*)>& f,
 #undef APPLY_TO_SINGULAR_FIELD
 #undef APPLY_TO_REPEATED_FIELD
 
-std::string ConstraintCaseName(
+absl::string_view ConstraintCaseName(
     ConstraintProto::ConstraintCase constraint_case) {
   switch (constraint_case) {
     case ConstraintProto::ConstraintCase::kBoolOr:
@@ -438,14 +443,8 @@ std::string ConstraintCaseName(
       return "kIntDiv";
     case ConstraintProto::ConstraintCase::kIntMod:
       return "kIntMod";
-    case ConstraintProto::ConstraintCase::kIntMax:
-      return "kIntMax";
     case ConstraintProto::ConstraintCase::kLinMax:
       return "kLinMax";
-    case ConstraintProto::ConstraintCase::kIntMin:
-      return "kIntMin";
-    case ConstraintProto::ConstraintCase::kLinMin:
-      return "kLinMin";
     case ConstraintProto::ConstraintCase::kIntProd:
       return "kIntProd";
     case ConstraintProto::ConstraintCase::kLinear:
@@ -482,18 +481,16 @@ std::string ConstraintCaseName(
 }
 
 std::vector<int> UsedVariables(const ConstraintProto& ct) {
-  IndexReferences references = GetReferencesUsedByConstraint(ct);
-  for (int& ref : references.variables) {
+  std::vector<int> result;
+  GetReferencesUsedByConstraint(ct, &result, &result);
+  for (int& ref : result) {
     ref = PositiveRef(ref);
   }
-  for (const int lit : references.literals) {
-    references.variables.push_back(PositiveRef(lit));
-  }
   for (const int lit : ct.enforcement_literal()) {
-    references.variables.push_back(PositiveRef(lit));
+    result.push_back(PositiveRef(lit));
   }
-  gtl::STLSortAndRemoveDuplicates(&references.variables);
-  return references.variables;
+  gtl::STLSortAndRemoveDuplicates(&result);
+  return result;
 }
 
 std::vector<int> UsedIntervals(const ConstraintProto& ct) {
@@ -513,13 +510,7 @@ std::vector<int> UsedIntervals(const ConstraintProto& ct) {
       break;
     case ConstraintProto::ConstraintCase::kIntMod:
       break;
-    case ConstraintProto::ConstraintCase::kIntMax:
-      break;
     case ConstraintProto::ConstraintCase::kLinMax:
-      break;
-    case ConstraintProto::ConstraintCase::kIntMin:
-      break;
-    case ConstraintProto::ConstraintCase::kLinMin:
       break;
     case ConstraintProto::ConstraintCase::kIntProd:
       break;
@@ -563,19 +554,391 @@ std::vector<int> UsedIntervals(const ConstraintProto& ct) {
 }
 
 int64_t ComputeInnerObjective(const CpObjectiveProto& objective,
-                              const CpSolverResponse& response) {
+                              absl::Span<const int64_t> solution) {
   int64_t objective_value = 0;
-  auto& repeated_field_values = response.solution().empty()
-                                    ? response.solution_lower_bounds()
-                                    : response.solution();
   for (int i = 0; i < objective.vars_size(); ++i) {
     int64_t coeff = objective.coeffs(i);
     const int ref = objective.vars(i);
     const int var = PositiveRef(ref);
     if (!RefIsPositive(ref)) coeff = -coeff;
-    objective_value += coeff * repeated_field_values[var];
+    objective_value += coeff * solution[var];
   }
   return objective_value;
+}
+
+bool ExpressionContainsSingleRef(const LinearExpressionProto& expr) {
+  return expr.offset() == 0 && expr.vars_size() == 1 &&
+         std::abs(expr.coeffs(0)) == 1;
+}
+
+bool ExpressionIsAffine(const LinearExpressionProto& expr) {
+  return expr.vars_size() <= 1;
+}
+
+// Returns the reference the expression can be reduced to. It will DCHECK that
+// ExpressionContainsSingleRef(expr) is true.
+int GetSingleRefFromExpression(const LinearExpressionProto& expr) {
+  DCHECK(ExpressionContainsSingleRef(expr));
+  return expr.coeffs(0) == 1 ? expr.vars(0) : NegatedRef(expr.vars(0));
+}
+
+void AddLinearExpressionToLinearConstraint(const LinearExpressionProto& expr,
+                                           int64_t coefficient,
+                                           LinearConstraintProto* linear) {
+  for (int i = 0; i < expr.vars_size(); ++i) {
+    linear->add_vars(expr.vars(i));
+    linear->add_coeffs(expr.coeffs(i) * coefficient);
+  }
+  DCHECK(!linear->domain().empty());
+  const int64_t shift = coefficient * expr.offset();
+  if (shift != 0) {
+    FillDomainInProto(ReadDomainFromProto(*linear).AdditionWith(Domain(-shift)),
+                      linear);
+  }
+}
+
+bool SafeAddLinearExpressionToLinearConstraint(
+    const LinearExpressionProto& expr, int64_t coefficient,
+    LinearConstraintProto* linear) {
+  for (int i = 0; i < expr.vars_size(); ++i) {
+    linear->add_vars(expr.vars(i));
+    const int64_t prod = CapProd(expr.coeffs(i), coefficient);
+    if (AtMinOrMaxInt64(prod)) return false;
+    linear->add_coeffs(prod);
+  }
+  DCHECK(!linear->domain().empty());
+
+  const int64_t shift = CapProd(coefficient, expr.offset());
+  if (AtMinOrMaxInt64(shift)) return false;
+  Domain d = ReadDomainFromProto(*linear).AdditionWith(Domain(-shift));
+  if (AtMinOrMaxInt64(d.Min()) || AtMinOrMaxInt64(d.Max())) return false;
+  FillDomainInProto(d, linear);
+  return true;
+}
+
+bool LinearExpressionProtosAreEqual(const LinearExpressionProto& a,
+                                    const LinearExpressionProto& b,
+                                    int64_t b_scaling) {
+  if (a.vars_size() != b.vars_size()) return false;
+  if (a.offset() != b.offset() * b_scaling) return false;
+  absl::flat_hash_map<int, int64_t> coeffs;
+  for (int i = 0; i < a.vars_size(); ++i) {
+    coeffs[a.vars(i)] += a.coeffs(i);
+    coeffs[b.vars(i)] += -b.coeffs(i) * b_scaling;
+  }
+
+  for (const auto [var, coeff] : coeffs) {
+    if (coeff != 0) return false;
+  }
+  return true;
+}
+
+uint64_t FingerprintExpression(const LinearExpressionProto& lin,
+                               uint64_t seed) {
+  uint64_t fp = seed;
+  if (!lin.vars().empty()) {
+    fp = FingerprintRepeatedField(lin.vars(), fp);
+    fp = FingerprintRepeatedField(lin.coeffs(), fp);
+  }
+  fp = FingerprintSingleField(lin.offset(), fp);
+  return fp;
+}
+
+uint64_t FingerprintModel(const CpModelProto& model, uint64_t seed) {
+  uint64_t fp = seed;
+  for (const IntegerVariableProto& var_proto : model.variables()) {
+    fp = FingerprintRepeatedField(var_proto.domain(), fp);
+  }
+  for (const ConstraintProto& ct : model.constraints()) {
+    if (!ct.enforcement_literal().empty()) {
+      fp = FingerprintRepeatedField(ct.enforcement_literal(), fp);
+    }
+    switch (ct.constraint_case()) {
+      case ConstraintProto::ConstraintCase::kBoolOr:
+        fp = FingerprintRepeatedField(ct.bool_or().literals(), fp);
+        break;
+      case ConstraintProto::ConstraintCase::kBoolAnd:
+        fp = FingerprintRepeatedField(ct.bool_and().literals(), fp);
+        break;
+      case ConstraintProto::ConstraintCase::kAtMostOne:
+        fp = FingerprintRepeatedField(ct.at_most_one().literals(), fp);
+        break;
+      case ConstraintProto::ConstraintCase::kExactlyOne:
+        fp = FingerprintRepeatedField(ct.exactly_one().literals(), fp);
+        break;
+      case ConstraintProto::ConstraintCase::kBoolXor:
+        fp = FingerprintRepeatedField(ct.bool_xor().literals(), fp);
+        break;
+      case ConstraintProto::ConstraintCase::kIntDiv:
+        fp = FingerprintExpression(ct.int_div().target(), fp);
+        for (const LinearExpressionProto& expr : ct.int_div().exprs()) {
+          fp = FingerprintExpression(expr, fp);
+        }
+        break;
+      case ConstraintProto::ConstraintCase::kIntMod:
+        fp = FingerprintExpression(ct.int_mod().target(), fp);
+        for (const LinearExpressionProto& expr : ct.int_mod().exprs()) {
+          fp = FingerprintExpression(expr, fp);
+        }
+        break;
+      case ConstraintProto::ConstraintCase::kLinMax: {
+        fp = FingerprintExpression(ct.lin_max().target(), fp);
+        for (const LinearExpressionProto& expr : ct.lin_max().exprs()) {
+          fp = FingerprintExpression(expr, fp);
+        }
+        break;
+      }
+      case ConstraintProto::ConstraintCase::kIntProd:
+        fp = FingerprintExpression(ct.int_prod().target(), fp);
+        for (const LinearExpressionProto& expr : ct.int_prod().exprs()) {
+          fp = FingerprintExpression(expr, fp);
+        }
+        break;
+      case ConstraintProto::ConstraintCase::kLinear:
+        fp = FingerprintRepeatedField(ct.linear().vars(), fp);
+        fp = FingerprintRepeatedField(ct.linear().coeffs(), fp);
+        fp = FingerprintRepeatedField(ct.linear().domain(), fp);
+        break;
+      case ConstraintProto::ConstraintCase::kAllDiff:
+        for (const LinearExpressionProto& expr : ct.all_diff().exprs()) {
+          fp = FingerprintExpression(expr, fp);
+        }
+        break;
+      case ConstraintProto::ConstraintCase::kDummyConstraint:
+        break;
+      case ConstraintProto::ConstraintCase::kElement:
+        fp = FingerprintSingleField(ct.element().index(), fp);
+        fp = FingerprintSingleField(ct.element().target(), fp);
+        fp = FingerprintRepeatedField(ct.element().vars(), fp);
+        break;
+      case ConstraintProto::ConstraintCase::kCircuit:
+        fp = FingerprintRepeatedField(ct.circuit().heads(), fp);
+        fp = FingerprintRepeatedField(ct.circuit().tails(), fp);
+        fp = FingerprintRepeatedField(ct.circuit().literals(), fp);
+        break;
+      case ConstraintProto::ConstraintCase::kRoutes:
+        fp = FingerprintRepeatedField(ct.routes().heads(), fp);
+        fp = FingerprintRepeatedField(ct.routes().tails(), fp);
+        fp = FingerprintRepeatedField(ct.routes().literals(), fp);
+        break;
+      case ConstraintProto::ConstraintCase::kInverse:
+        fp = FingerprintRepeatedField(ct.inverse().f_direct(), fp);
+        fp = FingerprintRepeatedField(ct.inverse().f_inverse(), fp);
+        break;
+      case ConstraintProto::ConstraintCase::kReservoir:
+        fp = FingerprintSingleField(ct.reservoir().min_level(), fp);
+        fp = FingerprintSingleField(ct.reservoir().max_level(), fp);
+        for (const LinearExpressionProto& expr : ct.reservoir().time_exprs()) {
+          fp = FingerprintExpression(expr, fp);
+        }
+        for (const LinearExpressionProto& expr :
+             ct.reservoir().level_changes()) {
+          fp = FingerprintExpression(expr, fp);
+        }
+        break;
+      case ConstraintProto::ConstraintCase::kTable:
+        fp = FingerprintRepeatedField(ct.table().vars(), fp);
+        fp = FingerprintRepeatedField(ct.table().values(), fp);
+        fp = FingerprintSingleField(ct.table().negated(), fp);
+        break;
+      case ConstraintProto::ConstraintCase::kAutomaton:
+        fp = FingerprintSingleField(ct.automaton().starting_state(), fp);
+        fp = FingerprintRepeatedField(ct.automaton().final_states(), fp);
+        fp = FingerprintRepeatedField(ct.automaton().transition_tail(), fp);
+        fp = FingerprintRepeatedField(ct.automaton().transition_head(), fp);
+        fp = FingerprintRepeatedField(ct.automaton().transition_label(), fp);
+        fp = FingerprintRepeatedField(ct.automaton().vars(), fp);
+        break;
+      case ConstraintProto::ConstraintCase::kInterval:
+        fp = FingerprintExpression(ct.interval().start(), fp);
+        fp = FingerprintExpression(ct.interval().size(), fp);
+        fp = FingerprintExpression(ct.interval().end(), fp);
+        break;
+      case ConstraintProto::ConstraintCase::kNoOverlap:
+        fp = FingerprintRepeatedField(ct.no_overlap().intervals(), fp);
+        break;
+      case ConstraintProto::ConstraintCase::kNoOverlap2D:
+        fp = FingerprintRepeatedField(ct.no_overlap_2d().x_intervals(), fp);
+        fp = FingerprintRepeatedField(ct.no_overlap_2d().y_intervals(), fp);
+        break;
+      case ConstraintProto::ConstraintCase::kCumulative:
+        fp = FingerprintRepeatedField(ct.cumulative().intervals(), fp);
+        fp = FingerprintExpression(ct.cumulative().capacity(), fp);
+        for (const LinearExpressionProto& demand : ct.cumulative().demands()) {
+          fp = FingerprintExpression(demand, fp);
+        }
+        break;
+      case ConstraintProto::ConstraintCase::CONSTRAINT_NOT_SET:
+        break;
+    }
+  }
+
+  // Fingerprint the objective.
+  if (model.has_objective()) {
+    fp = FingerprintRepeatedField(model.objective().vars(), fp);
+    fp = FingerprintRepeatedField(model.objective().coeffs(), fp);
+    fp = FingerprintSingleField(model.objective().offset(), fp);
+    fp = FingerprintSingleField(model.objective().scaling_factor(), fp);
+    fp = FingerprintRepeatedField(model.objective().domain(), fp);
+  } else if (model.has_floating_point_objective()) {
+    fp = FingerprintRepeatedField(model.floating_point_objective().vars(), fp);
+    fp =
+        FingerprintRepeatedField(model.floating_point_objective().coeffs(), fp);
+    fp = FingerprintSingleField(model.floating_point_objective().offset(), fp);
+    fp =
+        FingerprintSingleField(model.floating_point_objective().maximize(), fp);
+  }
+
+  if (model.has_solution_hint()) {
+    fp = FingerprintRepeatedField(model.solution_hint().vars(), fp);
+    fp = FingerprintRepeatedField(model.solution_hint().values(), fp);
+  }
+
+  // TODO(user): Should we fingerprint decision strategies?
+
+  return fp;
+}
+
+#if !defined(__PORTABLE_PLATFORM__)
+namespace {
+
+// We need to print " { " instead of " {\n" to inline our variables like:
+//
+// variables { domain: [0, 1] }
+//
+// instead of
+//
+// variables {
+//   domain: [0, 1] }
+class InlineFieldPrinter
+    : public google::protobuf::TextFormat::FastFieldValuePrinter {
+  void PrintMessageStart(const google::protobuf::Message& /*message*/,
+                         int /*field_index*/, int /*field_count*/,
+                         bool /*single_line_mode*/,
+                         google::protobuf::TextFormat::BaseTextGenerator*
+                             generator) const override {
+    generator->PrintLiteral(" { ");
+  }
+};
+
+class InlineMessagePrinter
+    : public google::protobuf::TextFormat::MessagePrinter {
+ public:
+  InlineMessagePrinter() {
+    printer_.SetSingleLineMode(true);
+    printer_.SetUseShortRepeatedPrimitives(true);
+  }
+
+  void Print(const google::protobuf::Message& message,
+             bool /*single_line_mode*/,
+             google::protobuf::TextFormat::BaseTextGenerator* generator)
+      const override {
+    buffer_.clear();
+    printer_.PrintToString(message, &buffer_);
+    generator->Print(buffer_.data(), buffer_.size());
+  }
+
+ private:
+  google::protobuf::TextFormat::Printer printer_;
+  mutable std::string buffer_;
+};
+
+// Register a InlineFieldPrinter() for all the fields containing the message we
+// want to print in one line.
+void RegisterFieldPrinters(
+    const google::protobuf::Descriptor* descriptor,
+    absl::flat_hash_set<const google::protobuf::Descriptor*>* descriptors,
+    google::protobuf::TextFormat::Printer* printer) {
+  // Recursion stopper.
+  if (!descriptors->insert(descriptor).second) return;
+
+  for (int i = 0; i < descriptor->field_count(); ++i) {
+    const google::protobuf::FieldDescriptor* field = descriptor->field(i);
+    if (field->type() == google::protobuf::FieldDescriptor::TYPE_MESSAGE) {
+      if (field->message_type() == IntegerVariableProto::descriptor() ||
+          field->message_type() == LinearExpressionProto::descriptor()) {
+        printer->RegisterFieldValuePrinter(field, new InlineFieldPrinter());
+      } else {
+        RegisterFieldPrinters(field->message_type(), descriptors, printer);
+      }
+    }
+  }
+}
+
+}  // namespace
+
+void SetupTextFormatPrinter(google::protobuf::TextFormat::Printer* printer) {
+  printer->SetUseShortRepeatedPrimitives(true);
+  absl::flat_hash_set<const google::protobuf::Descriptor*> descriptors;
+  RegisterFieldPrinters(CpModelProto::descriptor(), &descriptors, printer);
+  printer->RegisterMessagePrinter(IntegerVariableProto::descriptor(),
+                                  new InlineMessagePrinter());
+  printer->RegisterMessagePrinter(LinearExpressionProto::descriptor(),
+                                  new InlineMessagePrinter());
+}
+#endif  // !defined(__PORTABLE_PLATFORM__)
+
+bool ConvertCpModelProtoToCnf(const CpModelProto& cp_model, std::string* out) {
+  out->clear();
+
+  // We should have no objective, only unassigned Boolean, and only bool_or and
+  // bool_and.
+  if (cp_model.has_objective()) return false;
+  const int num_vars = cp_model.variables().size();
+  for (int v = 0; v < num_vars; ++v) {
+    if (cp_model.variables(v).domain().size() != 2) return false;
+    if (cp_model.variables(v).domain(0) != 0) return false;
+    if (cp_model.variables(v).domain(1) != 1) return false;
+  }
+  int num_clauses = 0;
+  for (const ConstraintProto& ct : cp_model.constraints()) {
+    if (ct.constraint_case() == ConstraintProto::kBoolOr) {
+      ++num_clauses;
+    } else if (ct.constraint_case() == ConstraintProto::kBoolAnd) {
+      num_clauses += ct.bool_and().literals().size();
+    } else {
+      return false;
+    }
+  }
+
+  // We can convert.
+  std::string start;
+  absl::StrAppend(out, "p cnf ", num_vars, " ", num_clauses, "\n");
+  for (const ConstraintProto& ct : cp_model.constraints()) {
+    if (ct.constraint_case() == ConstraintProto::kBoolOr) {
+      CHECK(ct.enforcement_literal().empty());
+      for (const int lit : ct.bool_or().literals()) {
+        const int value =
+            Literal(BooleanVariable(PositiveRef(lit)), RefIsPositive(lit))
+                .SignedValue();
+        absl::StrAppend(out, value, " ");
+      }
+      absl::StrAppend(out, "0\n");
+    } else if (ct.constraint_case() == ConstraintProto::kBoolAnd) {
+      CHECK(!ct.enforcement_literal().empty());
+      start.clear();
+      for (const int lit : ct.enforcement_literal()) {
+        const int value =
+            Literal(BooleanVariable(PositiveRef(lit)), RefIsPositive(lit))
+                .SignedValue();
+        absl::StrAppend(&start, -value, " ");
+      }
+      for (const int lit : ct.bool_and().literals()) {
+        const int value =
+            Literal(BooleanVariable(PositiveRef(lit)), RefIsPositive(lit))
+                .SignedValue();
+        absl::StrAppend(out, start, value, " 0\n");
+      }
+    }
+  }
+
+  return true;
+}
+
+int CombineSeed(int base_seed, int64_t delta) {
+  CHECK_GE(delta, 0);
+  const uint64_t fp = FingerprintSingleField(delta, kDefaultFingerprintSeed);
+  return static_cast<int>(FingerprintSingleField(base_seed, fp) & (0x7FFFFFFF));
 }
 
 }  // namespace sat

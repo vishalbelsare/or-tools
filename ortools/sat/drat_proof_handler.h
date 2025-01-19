@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -18,6 +18,9 @@
 #include <string>
 #include <vector>
 
+#if !defined(__PORTABLE_PLATFORM__)
+#include "ortools/base/file.h"
+#endif  // !defined(__PORTABLE_PLATFORM__)
 #include "absl/types/span.h"
 #include "ortools/base/strong_vector.h"
 #include "ortools/sat/drat_checker.h"
@@ -46,7 +49,7 @@ class DratProofHandler {
   // store it in memory as well (in which case the proof can be checked with
   // Check() when it is complete).
   DratProofHandler(bool in_binary_format, File* output, bool check = false);
-  ~DratProofHandler() {}
+  ~DratProofHandler() = default;
 
   // During the presolve step, variable get deleted and the set of non-deleted
   // variable is remaped in a dense set. This allows to keep track of that and
@@ -55,8 +58,8 @@ class DratProofHandler {
   //
   // TODO(user): This is exactly the same mecanism as in the SatPostsolver
   // class. Factor out the code.
-  void ApplyMapping(
-      const absl::StrongVector<BooleanVariable, BooleanVariable>& mapping);
+  void ApplyMapping(const util_intops::StrongVector<BooleanVariable,
+                                                    BooleanVariable>& mapping);
 
   // This need to be called when new variables are created.
   void SetNumVariables(int num_variables);
@@ -102,7 +105,7 @@ class DratProofHandler {
 
   // This mapping will be applied to all clause passed to AddClause() or
   // DeleteClause() so that they are in term of the original problem.
-  absl::StrongVector<BooleanVariable, BooleanVariable> reverse_mapping_;
+  util_intops::StrongVector<BooleanVariable, BooleanVariable> reverse_mapping_;
 
   std::unique_ptr<DratChecker> drat_checker_;
   std::unique_ptr<DratWriter> drat_writer_;

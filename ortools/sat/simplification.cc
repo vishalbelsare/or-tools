@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -15,22 +15,32 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <deque>
 #include <limits>
-#include <set>
+#include <memory>
 #include <utility>
+#include <vector>
 
-#include "absl/memory/memory.h"
+#include "absl/container/btree_set.h"
+#include "absl/log/check.h"
+#include "absl/types/span.h"
 #include "ortools/algorithms/dynamic_partition.h"
 #include "ortools/base/adjustable_priority_queue-inl.h"
+#include "ortools/base/adjustable_priority_queue.h"
 #include "ortools/base/logging.h"
-#include "ortools/base/random.h"
 #include "ortools/base/stl_util.h"
 #include "ortools/base/strong_vector.h"
 #include "ortools/base/timer.h"
 #include "ortools/graph/strongly_connected_components.h"
+#include "ortools/sat/drat_proof_handler.h"
+#include "ortools/sat/model.h"
 #include "ortools/sat/probing.h"
+#include "ortools/sat/sat_base.h"
 #include "ortools/sat/sat_inprocessing.h"
-#include "ortools/sat/util.h"
+#include "ortools/sat/sat_parameters.pb.h"
+#include "ortools/sat/sat_solver.h"
+#include "ortools/util/logging.h"
+#include "ortools/util/strong_integers.h"
 #include "ortools/util/time_limit.h"
 
 namespace operations_research {
@@ -61,8 +71,9 @@ void SatPostsolver::FixVariable(Literal x) {
 }
 
 void SatPostsolver::ApplyMapping(
-    const absl::StrongVector<BooleanVariable, BooleanVariable>& mapping) {
-  absl::StrongVector<BooleanVariable, BooleanVariable> new_mapping;
+    const util_intops::StrongVector<BooleanVariable, BooleanVariable>&
+        mapping) {
+  util_intops::StrongVector<BooleanVariable, BooleanVariable> new_mapping;
   if (reverse_mapping_.size() < mapping.size()) {
     // We have new variables.
     while (reverse_mapping_.size() < mapping.size()) {
@@ -171,7 +182,7 @@ void SatPresolver::AddClause(absl::Span<const Literal> clause) {
   if (!equiv_mapping_.empty()) {
     for (int i = 0; i < clause_ref.size(); ++i) {
       const Literal old_literal = clause_ref[i];
-      clause_ref[i] = Literal(equiv_mapping_[clause_ref[i].Index()]);
+      clause_ref[i] = Literal(equiv_mapping_[clause_ref[i]]);
       if (old_literal != clause_ref[i]) changed = true;
     }
   }
@@ -209,8 +220,8 @@ void SatPresolver::AddClause(absl::Span<const Literal> clause) {
     literal_to_clause_sizes_.resize(required_size);
   }
   for (Literal e : clause_ref) {
-    literal_to_clauses_[e.Index()].push_back(ci);
-    literal_to_clause_sizes_[e.Index()]++;
+    literal_to_clauses_[e].push_back(ci);
+    literal_to_clause_sizes_[e]++;
   }
 }
 
@@ -233,8 +244,8 @@ void SatPresolver::AddClauseInternal(std::vector<Literal>* clause) {
   in_clause_to_process_.push_back(true);
   clause_to_process_.push_back(ci);
   for (const Literal e : clauses_.back()) {
-    literal_to_clauses_[e.Index()].push_back(ci);
-    literal_to_clause_sizes_[e.Index()]++;
+    literal_to_clauses_[e].push_back(ci);
+    literal_to_clause_sizes_[e]++;
     UpdatePriorityQueue(e.Variable());
     UpdateBvaPriorityQueue(e.Index());
   }
@@ -243,13 +254,13 @@ void SatPresolver::AddClauseInternal(std::vector<Literal>* clause) {
   DCHECK_EQ(signatures_.size(), clauses_.size());
 }
 
-absl::StrongVector<BooleanVariable, BooleanVariable>
+util_intops::StrongVector<BooleanVariable, BooleanVariable>
 SatPresolver::VariableMapping() const {
-  absl::StrongVector<BooleanVariable, BooleanVariable> result;
+  util_intops::StrongVector<BooleanVariable, BooleanVariable> result;
   BooleanVariable new_var(0);
   for (BooleanVariable var(0); var < NumVariables(); ++var) {
-    if (literal_to_clause_sizes_[Literal(var, true).Index()] > 0 ||
-        literal_to_clause_sizes_[Literal(var, false).Index()] > 0) {
+    if (literal_to_clause_sizes_[Literal(var, true)] > 0 ||
+        literal_to_clause_sizes_[Literal(var, false)] > 0) {
       result.push_back(new_var);
       ++new_var;
     } else {
@@ -269,7 +280,7 @@ void SatPresolver::LoadProblemIntoSatSolver(SatSolver* solver) {
   literal_to_clauses_.clear();
   signatures_.clear();
 
-  const absl::StrongVector<BooleanVariable, BooleanVariable> mapping =
+  const util_intops::StrongVector<BooleanVariable, BooleanVariable> mapping =
       VariableMapping();
   int new_size = 0;
   for (BooleanVariable index : mapping) {
@@ -295,10 +306,10 @@ bool SatPresolver::ProcessAllClauses() {
 
   // Because on large problem we don't have a budget to process all clauses,
   // lets start by the smallest ones first.
-  std::sort(clause_to_process_.begin(), clause_to_process_.end(),
-            [this](ClauseIndex c1, ClauseIndex c2) {
-              return clauses_[c1].size() < clauses_[c2].size();
-            });
+  std::stable_sort(clause_to_process_.begin(), clause_to_process_.end(),
+                   [this](ClauseIndex c1, ClauseIndex c2) {
+                     return clauses_[c1].size() < clauses_[c2].size();
+                   });
   while (!clause_to_process_.empty()) {
     const ClauseIndex ci = clause_to_process_.front();
     in_clause_to_process_[ci] = false;
@@ -371,6 +382,7 @@ bool SatPresolver::Presolve(const std::vector<bool>& can_be_removed) {
   return true;
 }
 
+// TODO(user): Put work limit in place !
 void SatPresolver::PresolveWithBva() {
   var_pq_elements_.clear();  // so we don't update it.
   InitializeBvaPriorityQueue();
@@ -378,6 +390,7 @@ void SatPresolver::PresolveWithBva() {
     const LiteralIndex lit = bva_pq_.Top()->literal;
     bva_pq_.Pop();
     SimpleBva(lit);
+    if (time_limit_ != nullptr && time_limit_->LimitReached()) break;
   }
 }
 
@@ -393,7 +406,7 @@ void SatPresolver::SimpleBva(LiteralIndex l) {
   m_cls_ = literal_to_clauses_[l];
 
   int reduction = 0;
-  while (true) {
+  for (int loop = 0; loop < 100; ++loop) {
     LiteralIndex lmax = kNoLiteralIndex;
     int max_size = 0;
 
@@ -451,7 +464,7 @@ void SatPresolver::SimpleBva(LiteralIndex l) {
 
     // Set m_cls_ to p_[lmax].
     m_cls_.clear();
-    for (const auto entry : flattened_p_) {
+    for (const auto& entry : flattened_p_) {
       literal_to_p_size_[entry.first] = 0;
       if (entry.first == lmax) m_cls_.push_back(entry.second);
     }
@@ -459,7 +472,7 @@ void SatPresolver::SimpleBva(LiteralIndex l) {
   }
 
   // Make sure literal_to_p_size_ is all zero.
-  for (const auto entry : flattened_p_) literal_to_p_size_[entry.first] = 0;
+  for (const auto& entry : flattened_p_) literal_to_p_size_[entry.first] = 0;
   flattened_p_.clear();
 
   // A strictly positive reduction means that applying the BVA transform will
@@ -559,8 +572,8 @@ bool SatPresolver::ProcessClauseToSimplifyOthersUsingLiteral(
   // loop to also detect if there is any empty clause, in which case we will
   // trigger a "cleaning" below.
   bool need_cleaning = false;
-  num_inspected_signatures_ += literal_to_clauses_[lit.Index()].size();
-  for (const ClauseIndex ci : literal_to_clauses_[lit.Index()]) {
+  num_inspected_signatures_ += literal_to_clauses_[lit].size();
+  for (const ClauseIndex ci : literal_to_clauses_[lit]) {
     const uint64_t ci_signature = signatures_[ci];
 
     // This allows to check for empty clause without fetching the memory at
@@ -609,12 +622,12 @@ bool SatPresolver::ProcessClauseToSimplifyOthersUsingLiteral(
 
   if (need_cleaning) {
     int new_index = 0;
-    auto& occurrence_list_ref = literal_to_clauses_[lit.Index()];
+    auto& occurrence_list_ref = literal_to_clauses_[lit];
     for (const ClauseIndex ci : occurrence_list_ref) {
       if (signatures_[ci] != 0) occurrence_list_ref[new_index++] = ci;
     }
     occurrence_list_ref.resize(new_index);
-    DCHECK_EQ(literal_to_clause_sizes_[lit.Index()], new_index);
+    DCHECK_EQ(literal_to_clause_sizes_[lit], new_index);
   }
 
   return true;
@@ -692,15 +705,15 @@ bool SatPresolver::ProcessClauseToSimplifyOthers(ClauseIndex clause_index) {
 }
 
 void SatPresolver::RemoveAndRegisterForPostsolveAllClauseContaining(Literal x) {
-  for (ClauseIndex i : literal_to_clauses_[x.Index()]) {
+  for (ClauseIndex i : literal_to_clauses_[x]) {
     if (!clauses_[i].empty()) RemoveAndRegisterForPostsolve(i, x);
   }
-  gtl::STLClearObject(&literal_to_clauses_[x.Index()]);
-  literal_to_clause_sizes_[x.Index()] = 0;
+  gtl::STLClearObject(&literal_to_clauses_[x]);
+  literal_to_clause_sizes_[x] = 0;
 }
 
 bool SatPresolver::CrossProduct(Literal x) {
-  const int s1 = literal_to_clause_sizes_[x.Index()];
+  const int s1 = literal_to_clause_sizes_[x];
   const int s2 = literal_to_clause_sizes_[x.NegatedIndex()];
 
   // Note that if s1 or s2 is equal to 0, this function will implicitly just
@@ -716,7 +729,7 @@ bool SatPresolver::CrossProduct(Literal x) {
   // Compute the threshold under which we don't remove x.Variable().
   int threshold = 0;
   const int clause_weight = parameters_.presolve_bve_clause_weight();
-  for (ClauseIndex i : literal_to_clauses_[x.Index()]) {
+  for (ClauseIndex i : literal_to_clauses_[x]) {
     if (!clauses_[i].empty()) {
       threshold += clause_weight + clauses_[i].size();
     }
@@ -732,7 +745,7 @@ bool SatPresolver::CrossProduct(Literal x) {
 
   // Test whether we should remove the x.Variable().
   int size = 0;
-  for (ClauseIndex i : literal_to_clauses_[x.Index()]) {
+  for (ClauseIndex i : literal_to_clauses_[x]) {
     if (clauses_[i].empty()) continue;
     bool no_resolvant = true;
     for (ClauseIndex j : literal_to_clauses_[x.NegatedIndex()]) {
@@ -767,7 +780,7 @@ bool SatPresolver::CrossProduct(Literal x) {
   // Note that the variable priority queue will only be updated during the
   // deletion.
   std::vector<Literal> temp;
-  for (ClauseIndex i : literal_to_clauses_[x.Index()]) {
+  for (ClauseIndex i : literal_to_clauses_[x]) {
     if (clauses_[i].empty()) continue;
     for (ClauseIndex j : literal_to_clauses_[x.NegatedIndex()]) {
       if (clauses_[j].empty()) continue;
@@ -792,7 +805,7 @@ bool SatPresolver::CrossProduct(Literal x) {
 void SatPresolver::Remove(ClauseIndex ci) {
   signatures_[ci] = 0;
   for (Literal e : clauses_[ci]) {
-    literal_to_clause_sizes_[e.Index()]--;
+    literal_to_clause_sizes_[e]--;
     UpdatePriorityQueue(e.Variable());
     UpdateBvaPriorityQueue(Literal(e.Variable(), true).Index());
     UpdateBvaPriorityQueue(Literal(e.Variable(), false).Index());
@@ -812,9 +825,9 @@ Literal SatPresolver::FindLiteralWithShortestOccurrenceList(
     const std::vector<Literal>& clause) {
   DCHECK(!clause.empty());
   Literal result = clause.front();
-  int best_size = literal_to_clause_sizes_[result.Index()];
+  int best_size = literal_to_clause_sizes_[result];
   for (const Literal l : clause) {
-    const int size = literal_to_clause_sizes_[l.Index()];
+    const int size = literal_to_clause_sizes_[l];
     if (size < best_size) {
       result = l;
       best_size = size;
@@ -830,9 +843,9 @@ LiteralIndex SatPresolver::FindLiteralWithShortestOccurrenceListExcluding(
   int num_occurrences = std::numeric_limits<int>::max();
   for (const Literal l : clause) {
     if (l == to_exclude) continue;
-    if (literal_to_clause_sizes_[l.Index()] < num_occurrences) {
+    if (literal_to_clause_sizes_[l] < num_occurrences) {
       result = l.Index();
-      num_occurrences = literal_to_clause_sizes_[l.Index()];
+      num_occurrences = literal_to_clause_sizes_[l];
     }
   }
   return result;
@@ -841,8 +854,8 @@ LiteralIndex SatPresolver::FindLiteralWithShortestOccurrenceListExcluding(
 void SatPresolver::UpdatePriorityQueue(BooleanVariable var) {
   if (var_pq_elements_.empty()) return;  // not initialized.
   PQElement* element = &var_pq_elements_[var];
-  element->weight = literal_to_clause_sizes_[Literal(var, true).Index()] +
-                    literal_to_clause_sizes_[Literal(var, false).Index()];
+  element->weight = literal_to_clause_sizes_[Literal(var, true)] +
+                    literal_to_clause_sizes_[Literal(var, false)];
   if (var_pq_.Contains(element)) {
     var_pq_.NoteChangedPriority(element);
   } else {
@@ -856,8 +869,8 @@ void SatPresolver::InitializePriorityQueue() {
   for (BooleanVariable var(0); var < num_vars; ++var) {
     PQElement* element = &var_pq_elements_[var];
     element->variable = var;
-    element->weight = literal_to_clause_sizes_[Literal(var, true).Index()] +
-                      literal_to_clause_sizes_[Literal(var, false).Index()];
+    element->weight = literal_to_clause_sizes_[Literal(var, true)] +
+                      literal_to_clause_sizes_[Literal(var, false)];
     var_pq_.Add(element);
   }
 }
@@ -911,8 +924,8 @@ void SatPresolver::DisplayStats(double elapsed_seconds) {
   int num_simple_definition = 0;
   int num_vars = 0;
   for (BooleanVariable var(0); var < NumVariables(); ++var) {
-    const int s1 = literal_to_clause_sizes_[Literal(var, true).Index()];
-    const int s2 = literal_to_clause_sizes_[Literal(var, false).Index()];
+    const int s1 = literal_to_clause_sizes_[Literal(var, true)];
+    const int s2 = literal_to_clause_sizes_[Literal(var, false)];
     if (s1 == 0 && s2 == 0) continue;
 
     ++num_vars;
@@ -1088,6 +1101,10 @@ class PropagationGraph {
         deterministic_time_limit(solver->deterministic_time() +
                                  deterministic_time_limit) {}
 
+  // This type is neither copyable nor movable.
+  PropagationGraph(const PropagationGraph&) = delete;
+  PropagationGraph& operator=(const PropagationGraph&) = delete;
+
   // Returns the set of node adjacent to the given one.
   // Interface needed by FindStronglyConnectedComponents(), note that it needs
   // to be const.
@@ -1123,14 +1140,13 @@ class PropagationGraph {
   mutable std::vector<int32_t> scratchpad_;
   SatSolver* const solver_;
   const double deterministic_time_limit;
-
-  DISALLOW_COPY_AND_ASSIGN(PropagationGraph);
 };
 
 void ProbeAndFindEquivalentLiteral(
     SatSolver* solver, SatPostsolver* postsolver,
     DratProofHandler* drat_proof_handler,
-    absl::StrongVector<LiteralIndex, LiteralIndex>* mapping) {
+    util_intops::StrongVector<LiteralIndex, LiteralIndex>* mapping,
+    SolverLogger* logger) {
   WallTimer timer;
   timer.Start();
 
@@ -1197,7 +1213,7 @@ void ProbeAndFindEquivalentLiteral(
         const Literal true_lit = assignment.LiteralIsTrue(Literal(i))
                                      ? Literal(rep)
                                      : Literal(rep).Negated();
-        solver->AddUnitClause(true_lit);
+        if (!solver->AddUnitClause(true_lit)) return;
         if (drat_proof_handler != nullptr) {
           drat_proof_handler->AddClause({true_lit});
         }
@@ -1211,7 +1227,7 @@ void ProbeAndFindEquivalentLiteral(
           const Literal true_lit = assignment.LiteralIsTrue(Literal(rep))
                                        ? Literal(i)
                                        : Literal(i).Negated();
-          solver->AddUnitClause(true_lit);
+          if (!solver->AddUnitClause(true_lit)) return;
           if (drat_proof_handler != nullptr) {
             drat_proof_handler->AddClause({true_lit});
           }
@@ -1221,7 +1237,7 @@ void ProbeAndFindEquivalentLiteral(
           const Literal true_lit = assignment.LiteralIsTrue(Literal(i))
                                        ? Literal(rep)
                                        : Literal(rep).Negated();
-          solver->AddUnitClause(true_lit);
+          if (!solver->AddUnitClause(true_lit)) return;
           if (drat_proof_handler != nullptr) {
             drat_proof_handler->AddClause({true_lit});
           }
@@ -1236,176 +1252,22 @@ void ProbeAndFindEquivalentLiteral(
     }
   }
 
-  const bool log_info =
-      solver->parameters().log_search_progress() || VLOG_IS_ON(1);
-  LOG_IF(INFO, log_info) << "Probing. fixed " << num_already_fixed_vars << " + "
-                         << solver->LiteralTrail().Index() -
-                                num_already_fixed_vars
-                         << " equiv " << num_equiv / 2 << " total "
-                         << solver->NumVariables() << " wtime: " << timer.Get();
-}
-
-SatSolver::Status SolveWithPresolve(std::unique_ptr<SatSolver>* solver,
-                                    TimeLimit* time_limit,
-                                    std::vector<bool>* solution,
-                                    DratProofHandler* drat_proof_handler,
-                                    SolverLogger* logger) {
-  // We save the initial parameters.
-  const SatParameters parameters = (*solver)->parameters();
-  SatPostsolver postsolver((*solver)->NumVariables());
-
-  const bool log_info = parameters.log_search_progress() || VLOG_IS_ON(1);
-
-  // Some problems are formulated in such a way that our SAT heuristics
-  // simply works without conflict. Get them out of the way first because it
-  // is possible that the presolve lose this "lucky" ordering. This is in
-  // particular the case on the SAT14.crafted.complete-xxx-... problems.
-  {
-    Model* model = (*solver)->model();
-    const double dtime = std::min(1.0, time_limit->GetDeterministicTimeLeft());
-    if (!LookForTrivialSatSolution(dtime, model)) {
-      VLOG(1) << "UNSAT during probing.";
-      return SatSolver::INFEASIBLE;
-    }
-    const int num_variables = (*solver)->NumVariables();
-    if ((*solver)->LiteralTrail().Index() == num_variables) {
-      VLOG(1) << "Problem solved by trivial heuristic!";
-      solution->clear();
-      for (int i = 0; i < (*solver)->NumVariables(); ++i) {
-        solution->push_back((*solver)->Assignment().LiteralIsTrue(
-            Literal(BooleanVariable(i), true)));
-      }
-      return SatSolver::FEASIBLE;
-    }
+  if (logger != nullptr) {
+    SOLVER_LOG(logger, "[Pure SAT probing] fixed ", num_already_fixed_vars,
+               " + ", solver->LiteralTrail().Index() - num_already_fixed_vars,
+               " equiv ", num_equiv / 2, " total ", solver->NumVariables(),
+               " wtime: ", timer.Get());
+  } else {
+    const bool log_info =
+        solver->parameters().log_search_progress() || VLOG_IS_ON(1);
+    LOG_IF(INFO, log_info) << "Probing. fixed " << num_already_fixed_vars
+                           << " + "
+                           << solver->LiteralTrail().Index() -
+                                  num_already_fixed_vars
+                           << " equiv " << num_equiv / 2 << " total "
+                           << solver->NumVariables()
+                           << " wtime: " << timer.Get();
   }
-
-  // We use a new block so the memory used by the presolver can be
-  // reclaimed as soon as it is no longer needed.
-  const int max_num_passes = 4;
-  for (int i = 0; i < max_num_passes && !time_limit->LimitReached(); ++i) {
-    const int saved_num_variables = (*solver)->NumVariables();
-
-    // Run the new preprocessing code. Note that the probing that it does is
-    // faster than the ProbeAndFindEquivalentLiteral() call below, but does not
-    // do equivalence detection as completely, so we still apply the other
-    // "probing" code afterwards even if it will not fix more literals, but it
-    // will do one pass of proper equivalence detection.
-    {
-      Model* model = (*solver)->model();
-      model->GetOrCreate<TimeLimit>()->MergeWithGlobalTimeLimit(time_limit);
-      SatPresolveOptions options;
-      options.log_info = log_info;
-      options.extract_binary_clauses_in_probing = false;
-      options.use_transitive_reduction = false;
-      options.deterministic_time_limit =
-          parameters.presolve_probing_deterministic_time_limit();
-
-      if (!model->GetOrCreate<Inprocessing>()->PresolveLoop(options)) {
-        VLOG(1) << "UNSAT during probing.";
-        return SatSolver::INFEASIBLE;
-      }
-      for (const auto& c : model->GetOrCreate<PostsolveClauses>()->clauses) {
-        postsolver.Add(c[0], c);
-      }
-    }
-
-    // Probe + find equivalent literals.
-    // TODO(user): Use a derived time limit in the probing phase.
-    absl::StrongVector<LiteralIndex, LiteralIndex> equiv_map;
-    ProbeAndFindEquivalentLiteral((*solver).get(), &postsolver,
-                                  drat_proof_handler, &equiv_map);
-    if ((*solver)->IsModelUnsat()) {
-      VLOG(1) << "UNSAT during probing.";
-      return SatSolver::INFEASIBLE;
-    }
-
-    // The rest of the presolve only work on pure SAT problem.
-    if (!(*solver)->ProblemIsPureSat()) {
-      VLOG(1) << "The problem is not a pure SAT problem, skipping the SAT "
-                 "specific presolve.";
-      break;
-    }
-
-    // Register the fixed variables with the postsolver.
-    // TODO(user): Find a better place for this?
-    (*solver)->Backtrack(0);
-    for (int i = 0; i < (*solver)->LiteralTrail().Index(); ++i) {
-      postsolver.FixVariable((*solver)->LiteralTrail()[i]);
-    }
-
-    // TODO(user): Pass the time_limit to the presolver.
-    SatPresolver presolver(&postsolver, logger);
-    presolver.SetParameters(parameters);
-    presolver.SetDratProofHandler(drat_proof_handler);
-    presolver.SetEquivalentLiteralMapping(equiv_map);
-    (*solver)->ExtractClauses(&presolver);
-    (*solver)->AdvanceDeterministicTime(time_limit);
-
-    // Tricky: the model local time limit is updated by the new functions, but
-    // the old ones update time_limit directly.
-    time_limit->AdvanceDeterministicTime((*solver)
-                                             ->model()
-                                             ->GetOrCreate<TimeLimit>()
-                                             ->GetElapsedDeterministicTime());
-
-    (*solver).reset(nullptr);
-    std::vector<bool> can_be_removed(presolver.NumVariables(), true);
-    if (!presolver.Presolve(can_be_removed)) {
-      VLOG(1) << "UNSAT during presolve.";
-
-      // This is just here to reset the SatSolver::Solve() statistics.
-      (*solver) = absl::make_unique<SatSolver>();
-      return SatSolver::INFEASIBLE;
-    }
-
-    postsolver.ApplyMapping(presolver.VariableMapping());
-    if (drat_proof_handler != nullptr) {
-      drat_proof_handler->ApplyMapping(presolver.VariableMapping());
-    }
-
-    // Load the presolved problem in a new solver.
-    (*solver) = absl::make_unique<SatSolver>();
-    (*solver)->SetDratProofHandler(drat_proof_handler);
-    (*solver)->SetParameters(parameters);
-    presolver.LoadProblemIntoSatSolver((*solver).get());
-
-    // Stop if a fixed point has been reached.
-    if ((*solver)->NumVariables() == saved_num_variables) break;
-  }
-
-  // Before solving, we use the new probing code that adds all new binary
-  // implication it can find to the binary implication graph. This gives good
-  // benefits. Note that we currently do not do it before presolve because then
-  // the current presolve code does not work too well with the potential huge
-  // number of binary clauses added.
-  //
-  // TODO(user): Revisit the situation when we simplify better all the clauses
-  // using binary ones. Or if/when we support at most one better in pure SAT
-  // solving and presolve.
-  {
-    Model* model = (*solver)->model();
-    model->GetOrCreate<TimeLimit>()->MergeWithGlobalTimeLimit(time_limit);
-    SatPresolveOptions options;
-    options.log_info = log_info;
-    options.use_transitive_reduction = true;
-    options.extract_binary_clauses_in_probing = true;
-    options.deterministic_time_limit =
-        model->GetOrCreate<SatParameters>()
-            ->presolve_probing_deterministic_time_limit();
-    if (!model->GetOrCreate<Inprocessing>()->PresolveLoop(options)) {
-      return SatSolver::INFEASIBLE;
-    }
-    for (const auto& c : model->GetOrCreate<PostsolveClauses>()->clauses) {
-      postsolver.Add(c[0], c);
-    }
-  }
-
-  // Solve.
-  const SatSolver::Status result = (*solver)->SolveWithTimeLimit(time_limit);
-  if (result == SatSolver::FEASIBLE) {
-    *solution = postsolver.ExtractAndPostsolveSolution(**solver);
-  }
-  return result;
 }
 
 }  // namespace sat

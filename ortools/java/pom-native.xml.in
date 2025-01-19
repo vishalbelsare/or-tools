@@ -39,7 +39,7 @@
 <scm>
   <connection>scm:git:git://github.com/google/or-tools.git</connection>
   <developerConnection>scm:git:ssh://github.com:google/or-tools.git</developerConnection>
-  <url>http://github.com/google/or-tools/tree/master</url>
+  <url>http://github.com/google/or-tools/tree/main</url>
   <tag>HEAD</tag>
 </scm>
 
@@ -70,7 +70,7 @@
     <plugin>
       <groupId>org.apache.maven.plugins</groupId>
       <artifactId>maven-source-plugin</artifactId>
-      <version>3.2.0</version>
+      <version>3.3.1</version>
       <configuration>
         <excludes>
           <exclude>**/*.cxx</exclude>
@@ -88,7 +88,7 @@
     <plugin>
       <groupId>org.apache.maven.plugins</groupId>
       <artifactId>maven-javadoc-plugin</artifactId>
-      <version>3.2.0</version>
+      <version>3.8.0</version>
       <configuration>
         <detectJavaApiLink>false</detectJavaApiLink>
         <source>${maven.compiler.source}</source>
@@ -107,7 +107,7 @@
     <plugin>
       <groupId>org.apache.maven.plugins</groupId>
       <artifactId>maven-gpg-plugin</artifactId>
-      <version>1.6</version>
+      <version>3.2.5</version>
       <executions>
         <execution>
           <id>sign-artifacts</id>

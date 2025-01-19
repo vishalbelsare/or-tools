@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -14,13 +14,17 @@
 #include "ortools/algorithms/sparse_permutation.h"
 
 #include <algorithm>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "absl/strings/str_join.h"
+#include "absl/types/span.h"
 #include "ortools/base/logging.h"
 
 namespace operations_research {
 
-void SparsePermutation::RemoveCycles(const std::vector<int>& cycle_indices) {
+void SparsePermutation::RemoveCycles(absl::Span<const int> cycle_indices) {
   // TODO(user): make this a class member to avoid allocation if the complexity
   // becomes an issue. In this case, also optimize the loop below by not copying
   // the first cycles.
@@ -63,7 +67,7 @@ std::string SparsePermutation::DebugString() const {
     std::vector<int> cycle;
     for (int i = min_pos; i < end; ++i) cycle.push_back(cycles_[i]);
     for (int i = start; i < min_pos; ++i) cycle.push_back(cycles_[i]);
-    cycles.push_back(cycle);
+    cycles.push_back(std::move(cycle));
     start = end;
   }
   std::sort(cycles.begin(), cycles.end());

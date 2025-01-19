@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -14,14 +14,25 @@
 #ifndef OR_TOOLS_SAT_PROBING_H_
 #define OR_TOOLS_SAT_PROBING_H_
 
+#include <functional>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "absl/container/btree_map.h"
+#include "absl/container/btree_set.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "ortools/sat/clause.h"
 #include "ortools/sat/implied_bounds.h"
 #include "ortools/sat/integer.h"
 #include "ortools/sat/model.h"
 #include "ortools/sat/sat_base.h"
-#include "ortools/sat/util.h"
+#include "ortools/sat/sat_solver.h"
+#include "ortools/util/bitset.h"
 #include "ortools/util/logging.h"
+#include "ortools/util/time_limit.h"
 
 namespace operations_research {
 namespace sat {
@@ -72,6 +83,26 @@ class Prober {
 
   bool ProbeOneVariable(BooleanVariable b);
 
+  // Probes the given problem DNF (disjunction of conjunctions). Since one of
+  // the conjunction must be true, we might be able to fix literal or improve
+  // integer bounds if all conjunction propagate the same thing.
+  bool ProbeDnf(absl::string_view name,
+                absl::Span<const std::vector<Literal>> dnf);
+
+  // Statistics.
+  // They are reset each time ProbleBooleanVariables() is called.
+  // Note however that we do not reset them on a call to ProbeOneVariable().
+  int num_decisions() const { return num_decisions_; }
+  int num_new_literals_fixed() const { return num_new_literals_fixed_; }
+  int num_new_binary_clauses() const { return num_new_binary_; }
+
+  // Register a callback that will be called on each "propagation".
+  // One can inspect the VariablesAssignment to see what are the inferred
+  // literals.
+  void SetPropagationCallback(std::function<void(Literal decision)> f) {
+    callback_ = f;
+  }
+
  private:
   bool ProbeOneVariableInternal(BooleanVariable b);
 
@@ -80,6 +111,7 @@ class Prober {
   const VariablesAssignment& assignment_;
   IntegerTrail* integer_trail_;
   ImpliedBounds* implied_bounds_;
+  ProductDetector* product_detector_;
   SatSolver* sat_solver_;
   TimeLimit* time_limit_;
   BinaryImplicationGraph* implication_graph_;
@@ -93,11 +125,19 @@ class Prober {
   std::vector<Literal> to_fix_at_true_;
   std::vector<IntegerLiteral> new_integer_bounds_;
   std::vector<std::pair<Literal, Literal>> new_binary_clauses_;
+  absl::btree_set<LiteralIndex> new_propagated_literals_;
+  absl::btree_set<LiteralIndex> always_propagated_literals_;
+  absl::btree_map<IntegerVariable, IntegerValue> new_propagated_bounds_;
+  absl::btree_map<IntegerVariable, IntegerValue> always_propagated_bounds_;
 
   // Probing statistics.
+  int num_decisions_ = 0;
   int num_new_holes_ = 0;
   int num_new_binary_ = 0;
   int num_new_integer_bounds_ = 0;
+  int num_new_literals_fixed_ = 0;
+
+  std::function<void(Literal decision)> callback_ = nullptr;
 
   // Logger.
   SolverLogger* logger_;
@@ -113,7 +153,8 @@ class Prober {
 // abort and leave the solver with the full solution assigned.
 //
 // Returns false iff the problem is UNSAT.
-bool LookForTrivialSatSolution(double deterministic_time_limit, Model* model);
+bool LookForTrivialSatSolution(double deterministic_time_limit, Model* model,
+                               SolverLogger* logger);
 
 // Options for the FailedLiteralProbing() code below.
 //
@@ -170,7 +211,7 @@ struct ProbingOptions {
   // resolution have been performed may need to do more work.
   bool use_tree_look = true;
 
-  // There is two sligthly different implementation of the tree-look algo.
+  // There is two slightly different implementation of the tree-look algo.
   //
   // TODO(user): Decide which one is better, currently the difference seems
   // small but the queue seems slightly faster.
@@ -179,7 +220,7 @@ struct ProbingOptions {
   // If we detect as we probe that a new binary clause subsumes one of the
   // non-binary clause, we will replace the long clause by the binary one. This
   // is orthogonal to the extract_binary_clauses parameters which will add all
-  // binary clauses but not neceassirly check for subsumption.
+  // binary clauses but not necessarily check for subsumption.
   bool subsume_with_binary_clause = true;
 
   // We assume this is also true if --v 1 is activated.

@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -17,9 +17,10 @@
 #include <utility>
 #include <vector>
 
-#include "ortools/base/integral_types.h"
+#include "absl/log/check.h"
 #include "ortools/base/logging.h"
 #include "ortools/base/strong_vector.h"
+#include "ortools/base/types.h"
 #include "ortools/constraint_solver/routing_types.h"
 
 namespace operations_research {
@@ -62,7 +63,6 @@ class RoutingIndexManager {
   RoutingIndexManager(
       int num_nodes, int num_vehicles,
       const std::vector<std::pair<NodeIndex, NodeIndex> >& starts_ends);
-  ~RoutingIndexManager() {}
 
   // Returns the number of nodes in the manager.
   int num_nodes() const { return num_nodes_; }
@@ -102,9 +102,6 @@ class RoutingIndexManager {
   /// complete.
   int num_unique_depots() const { return num_unique_depots_; }
   std::vector<NodeIndex> GetIndexToNodeMap() const { return index_to_node_; }
-  absl::StrongVector<NodeIndex, int64_t> GetNodeToIndexMap() const {
-    return node_to_index_;
-  }
 
  private:
   void Initialize(
@@ -112,7 +109,7 @@ class RoutingIndexManager {
       const std::vector<std::pair<NodeIndex, NodeIndex> >& starts_ends);
 
   std::vector<NodeIndex> index_to_node_;
-  absl::StrongVector<NodeIndex, int64_t> node_to_index_;
+  util_intops::StrongVector<NodeIndex, int64_t> node_to_index_;
   std::vector<int64_t> vehicle_to_start_;
   std::vector<int64_t> vehicle_to_end_;
   int num_nodes_;

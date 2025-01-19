@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -13,8 +13,11 @@
 
 #include "ortools/lp_data/model_reader.h"
 
-#include "ortools/base/file.h"
+#include <string>
+
+#include "ortools/base/logging.h"
 #include "ortools/linear_solver/linear_solver.pb.h"
+#include "ortools/lp_data/lp_data.h"
 #include "ortools/lp_data/proto_utils.h"
 #include "ortools/util/file_util.h"
 
@@ -25,8 +28,8 @@ bool LoadMPModelProtoFromModelOrRequest(const std::string& input_file_path,
                                         MPModelProto* model) {
   MPModelProto model_proto;
   MPModelRequest request_proto;
-  ReadFileToProto(input_file_path, &model_proto);
-  ReadFileToProto(input_file_path, &request_proto);
+  ReadFileToProto(input_file_path, &model_proto).IgnoreError();
+  ReadFileToProto(input_file_path, &request_proto).IgnoreError();
   // If the input proto is in binary format, both ReadFileToProto could return
   // true. Instead use the actual number of variables found to test the
   // correct format of the input.

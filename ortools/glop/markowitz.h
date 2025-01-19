@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -75,6 +75,8 @@
 
 #include <cstdint>
 #include <queue>
+#include <string>
+#include <vector>
 
 #include "absl/container/inlined_vector.h"
 #include "ortools/base/logging.h"
@@ -99,7 +101,11 @@ namespace glop {
 // given step will only correspond to a subset of the initial indices.
 class MatrixNonZeroPattern {
  public:
-  MatrixNonZeroPattern() {}
+  MatrixNonZeroPattern() = default;
+
+  // This type is neither copyable nor movable.
+  MatrixNonZeroPattern(const MatrixNonZeroPattern&) = delete;
+  MatrixNonZeroPattern& operator=(const MatrixNonZeroPattern&) = delete;
 
   // Releases the memory used by this class.
   void Clear();
@@ -188,15 +194,14 @@ class MatrixNonZeroPattern {
   //
   // TODO(user): We could be even more efficient since a size of int32_t is
   // enough for us and we could store in common the inlined/not-inlined size.
-  absl::StrongVector<RowIndex, absl::InlinedVector<ColIndex, 6>> row_non_zero_;
+  util_intops::StrongVector<RowIndex, absl::InlinedVector<ColIndex, 6>>
+      row_non_zero_;
   StrictITIVector<RowIndex, int32_t> row_degree_;
   StrictITIVector<ColIndex, int32_t> col_degree_;
   DenseBooleanRow deleted_columns_;
   DenseBooleanRow bool_scratchpad_;
   std::vector<ColIndex> col_scratchpad_;
   ColIndex num_non_deleted_columns_;
-
-  DISALLOW_COPY_AND_ASSIGN(MatrixNonZeroPattern);
 };
 
 // Adjustable priority queue of columns. Pop() returns a column with the
@@ -204,7 +209,11 @@ class MatrixNonZeroPattern {
 // Empty columns (i.e. with degree 0) are not stored in the queue.
 class ColumnPriorityQueue {
  public:
-  ColumnPriorityQueue() {}
+  ColumnPriorityQueue() = default;
+
+  // This type is neither copyable nor movable.
+  ColumnPriorityQueue(const ColumnPriorityQueue&) = delete;
+  ColumnPriorityQueue& operator=(const ColumnPriorityQueue&) = delete;
 
   // Releases the memory used by this class.
   void Clear();
@@ -227,7 +236,6 @@ class ColumnPriorityQueue {
   StrictITIVector<ColIndex, int32_t> col_degree_;
   std::vector<std::vector<ColIndex>> col_by_degree_;
   int32_t min_degree_;
-  DISALLOW_COPY_AND_ASSIGN(ColumnPriorityQueue);
 };
 
 // Contains a set of columns indexed by ColIndex. This is like a SparseMatrix
@@ -236,7 +244,13 @@ class ColumnPriorityQueue {
 // reuses the memory of the columns that are no longer needed.
 class SparseMatrixWithReusableColumnMemory {
  public:
-  SparseMatrixWithReusableColumnMemory() {}
+  SparseMatrixWithReusableColumnMemory() = default;
+
+  // This type is neither copyable nor movable.
+  SparseMatrixWithReusableColumnMemory(
+      const SparseMatrixWithReusableColumnMemory&) = delete;
+  SparseMatrixWithReusableColumnMemory& operator=(
+      const SparseMatrixWithReusableColumnMemory&) = delete;
 
   // Resets the repository to num_cols empty columns.
   void Reset(ColIndex num_cols);
@@ -261,10 +275,9 @@ class SparseMatrixWithReusableColumnMemory {
   // mutable_column(col) is stored in columns_[mapping_[col]].
   // The columns_ that can be reused have their index stored in free_columns_.
   const SparseColumn empty_column_;
-  absl::StrongVector<ColIndex, int> mapping_;
+  util_intops::StrongVector<ColIndex, int> mapping_;
   std::vector<int> free_columns_;
   std::vector<SparseColumn> columns_;
-  DISALLOW_COPY_AND_ASSIGN(SparseMatrixWithReusableColumnMemory);
 };
 
 // The class that computes either the actual L.U decomposition, or the
@@ -272,7 +285,11 @@ class SparseMatrixWithReusableColumnMemory {
 // decomposition.
 class Markowitz {
  public:
-  Markowitz() {}
+  Markowitz() = default;
+
+  // This type is neither copyable nor movable.
+  Markowitz(const Markowitz&) = delete;
+  Markowitz& operator=(const Markowitz&) = delete;
 
   // Computes the full factorization with P, Q, L and U.
   //
@@ -335,8 +352,8 @@ class Markowitz {
   // column permutation that move these columns in order to form an identity
   // sub-matrix on the upper left.
   //
-  // Note(user): Linear programming bases usually have a resonable percentage of
-  // slack columns in them, so this gives a big speedup.
+  // Note(user): Linear programming bases usually have a reasonable percentage
+  // of slack columns in them, so this gives a big speedup.
   void ExtractSingletonColumns(const CompactSparseMatrixView& basis_matrix,
                                RowPermutation* row_perm,
                                ColumnPermutation* col_perm, int* index);
@@ -446,8 +463,6 @@ class Markowitz {
 
   // Number of floating point operations of the last factorization.
   int64_t num_fp_operations_;
-
-  DISALLOW_COPY_AND_ASSIGN(Markowitz);
 };
 
 }  // namespace glop

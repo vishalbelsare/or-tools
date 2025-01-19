@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -13,32 +13,38 @@
 
 #include "ortools/glop/lp_solver.h"
 
+#include <algorithm>
 #include <cmath>
-#include <stack>
-#include <vector>
+#include <cstdlib>
+#include <memory>
+#include <string>
 
-#include "absl/memory/memory.h"
-#include "absl/strings/match.h"
+#include "absl/flags/flag.h"
+#include "absl/log/check.h"
+#include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
-#include "ortools/base/commandlineflags.h"
-#include "ortools/base/integral_types.h"
-#include "ortools/base/timer.h"
+#include "google/protobuf/text_format.h"
+#include "ortools/base/logging.h"
+#include "ortools/base/version.h"
+#include "ortools/glop/parameters.pb.h"
 #include "ortools/glop/preprocessor.h"
+#include "ortools/glop/revised_simplex.h"
 #include "ortools/glop/status.h"
+#include "ortools/glop/variables_info.h"
+#include "ortools/linear_solver/linear_solver.pb.h"
+#include "ortools/lp_data/lp_data.h"
 #include "ortools/lp_data/lp_types.h"
 #include "ortools/lp_data/lp_utils.h"
 #include "ortools/lp_data/proto_utils.h"
+#include "ortools/port/proto_utils.h"
 #include "ortools/util/fp_utils.h"
+#include "ortools/util/logging.h"
 
-// TODO(user): abstract this in some way to the port directory.
 #ifndef __PORTABLE_PLATFORM__
+// TODO(user): abstract this in some way to the port directory.
 #include "ortools/util/file_util.h"
 #endif
 
-ABSL_FLAG(bool, lp_solver_enable_fp_exceptions, false,
-          "When true, NaNs and division / zero produce errors. "
-          "This is very useful for debugging, but incompatible with LLVM. "
-          "It is recommended to set this to false for production usage.");
 ABSL_FLAG(bool, lp_dump_to_proto_file, false,
           "Tells whether do dump the problem to a protobuf file.");
 ABSL_FLAG(bool, lp_dump_compressed_file, true,
@@ -98,10 +104,8 @@ void DumpLinearProgramIfRequiredByFlags(const LinearProgram& linear_program,
   const ProtoWriteFormat write_format = absl::GetFlag(FLAGS_lp_dump_binary_file)
                                             ? ProtoWriteFormat::kProtoBinary
                                             : ProtoWriteFormat::kProtoText;
-  if (!WriteProtoToFile(filespec, proto, write_format,
-                        absl::GetFlag(FLAGS_lp_dump_compressed_file))) {
-    LOG(DFATAL) << "Could not write " << filespec;
-  }
+  CHECK_OK(WriteProtoToFile(filespec, proto, write_format,
+                            absl::GetFlag(FLAGS_lp_dump_compressed_file)));
 #endif
 }
 
@@ -112,6 +116,10 @@ void DumpLinearProgramIfRequiredByFlags(const LinearProgram& linear_program,
 // --------------------------------------------------------
 
 LPSolver::LPSolver() : num_solves_(0) {}
+
+std::string LPSolver::GlopVersion() {
+  return absl::StrCat("Glop solver v", OrToolsVersionString());
+}
 
 void LPSolver::SetParameters(const GlopParameters& parameters) {
   parameters_ = parameters;
@@ -129,6 +137,8 @@ const GlopParameters& LPSolver::GetParameters() const { return parameters_; }
 
 GlopParameters* LPSolver::GetMutableParameters() { return &parameters_; }
 
+SolverLogger& LPSolver::GetSolverLogger() { return logger_; }
+
 ProblemStatus LPSolver::Solve(const LinearProgram& lp) {
   std::unique_ptr<TimeLimit> time_limit =
       TimeLimit::FromParameters(parameters_);
@@ -144,21 +154,7 @@ ProblemStatus LPSolver::SolveWithTimeLimit(const LinearProgram& lp,
   ++num_solves_;
   num_revised_simplex_iterations_ = 0;
   DumpLinearProgramIfRequiredByFlags(lp, num_solves_);
-  // Check some preconditions.
-  if (!lp.IsCleanedUp()) {
-    LOG(DFATAL) << "The columns of the given linear program should be ordered "
-                << "by row and contain no zero coefficients. Call CleanUp() "
-                << "on it before calling Solve().";
-    ResizeSolution(lp.num_constraints(), lp.num_variables());
-    return ProblemStatus::INVALID_PROBLEM;
-  }
-  if (!lp.IsValid()) {
-    LOG(DFATAL) << "The given linear program is invalid. It contains NaNs, "
-                << "infinite coefficients or invalid bounds specification. "
-                << "You can construct it in debug mode to get the exact cause.";
-    ResizeSolution(lp.num_constraints(), lp.num_variables());
-    return ProblemStatus::INVALID_PROBLEM;
-  }
+
   // Display a warning if running in non-opt, unless we're inside a unit test.
   DLOG(WARNING)
       << "\n******************************************************************"
@@ -168,40 +164,71 @@ ProblemStatus LPSolver::SolveWithTimeLimit(const LinearProgram& lp,
          "\n* compiling with optimizations enabled and by defining NDEBUG.   *"
          "\n******************************************************************";
 
-  // Note that we only activate the floating-point exceptions after we are sure
-  // that the program is valid. This way, if we have input NaNs, we will not
-  // crash.
-  ScopedFloatingPointEnv scoped_fenv;
-  if (absl::GetFlag(FLAGS_lp_solver_enable_fp_exceptions)) {
-#ifdef _MSC_VER
-    scoped_fenv.EnableExceptions(_EM_INVALID | EM_ZERODIVIDE);
-#else
-    scoped_fenv.EnableExceptions(FE_DIVBYZERO | FE_INVALID);
-#endif
+  // Setup the logger.
+  logger_.EnableLogging(parameters_.log_search_progress());
+  logger_.SetLogToStdOut(parameters_.log_to_stdout());
+  if (!parameters_.log_search_progress() && VLOG_IS_ON(1)) {
+    logger_.EnableLogging(true);
+    logger_.SetLogToStdOut(false);
+  }
+
+  // Log some initial info about the input model.
+  if (logger_.LoggingIsEnabled()) {
+    SOLVER_LOG(&logger_, "");
+    SOLVER_LOG(&logger_, "Initial problem: ", lp.GetDimensionString());
+    SOLVER_LOG(&logger_, "Objective stats: ", lp.GetObjectiveStatsString());
+    SOLVER_LOG(&logger_, "Bounds stats: ", lp.GetBoundsStatsString());
+    SOLVER_LOG(&logger_, "Parameters: ", ProtobufShortDebugString(parameters_));
+  }
+
+  // Check some preconditions.
+  if (!lp.IsCleanedUp()) {
+    LOG(DFATAL) << "The columns of the given linear program should be ordered "
+                << "by row and contain no zero coefficients. Call CleanUp() "
+                << "on it before calling Solve().";
+    ResizeSolution(lp.num_constraints(), lp.num_variables());
+    return ProblemStatus::INVALID_PROBLEM;
+  }
+
+  // TODO(user): Unfortunately we are not really helpful with the error message
+  // here. We could do a better job. However most client should talk to glop via
+  // an input protocol buffer which should have better validation messages.
+  if (!lp.IsValid(parameters_.max_valid_magnitude())) {
+    SOLVER_LOG(&logger_,
+               "The given linear program is invalid. It contains NaNs, "
+               "coefficients too large or invalid bounds specification.");
+    ResizeSolution(lp.num_constraints(), lp.num_variables());
+    return ProblemStatus::INVALID_PROBLEM;
   }
 
   // Make an internal copy of the problem for the preprocessing.
-  const bool log_info = parameters_.log_search_progress() || VLOG_IS_ON(1);
-  if (log_info) {
-    LOG(INFO) << "Initial problem: " << lp.GetDimensionString();
-    LOG(INFO) << "Objective stats: " << lp.GetObjectiveStatsString();
-    LOG(INFO) << "Bounds stats: " << lp.GetBoundsStatsString();
-  }
   current_linear_program_.PopulateFromLinearProgram(lp);
+
+  // Remove small entries even if presolve is off. This is mainly here to
+  // avoid floating point underflow. Keeping them can break many invariant like
+  // a * b == 0 iff a == 0 or b == 0.
+  //
+  // Note that our presolve/scaling can potentially create smaller entries than
+  // this, but the scale should stay reasonable.
+  //
+  // TODO(user): If speed matter, we could do that as we copy the program.
+  current_linear_program_.RemoveNearZeroEntries(parameters_.drop_magnitude());
 
   // Preprocess.
   MainLpPreprocessor preprocessor(&parameters_);
+  preprocessor.SetLogger(&logger_);
   preprocessor.SetTimeLimit(time_limit);
 
   const bool postsolve_is_needed = preprocessor.Run(&current_linear_program_);
 
-  if (log_info) {
-    LOG(INFO) << "Presolved problem: "
-              << current_linear_program_.GetDimensionString();
-    LOG(INFO) << "Objective stats: "
-              << current_linear_program_.GetObjectiveStatsString();
-    LOG(INFO) << "Bounds stats: "
-              << current_linear_program_.GetBoundsStatsString();
+  if (logger_.LoggingIsEnabled()) {
+    SOLVER_LOG(&logger_, "");
+    SOLVER_LOG(&logger_, "Presolved problem: ",
+               current_linear_program_.GetDimensionString());
+    SOLVER_LOG(&logger_, "Objective stats: ",
+               current_linear_program_.GetObjectiveStatsString());
+    SOLVER_LOG(&logger_, "Bounds stats: ",
+               current_linear_program_.GetBoundsStatsString());
   }
 
   // At this point, we need to initialize a ProblemSolution with the correct
@@ -209,6 +236,17 @@ ProblemStatus LPSolver::SolveWithTimeLimit(const LinearProgram& lp,
   ProblemSolution solution(current_linear_program_.num_constraints(),
                            current_linear_program_.num_variables());
   solution.status = preprocessor.status();
+  // LoadAndVerifySolution() below updates primal_values_, dual_values_,
+  // variable_statuses_ and constraint_statuses_ with the values stored in
+  // solution by RunPrimalDualPathFollowingMethodIfNeeded() and
+  // RunRevisedSimplexIfNeeded(), and hence clears any results stored in them
+  // from a previous run. In contrast, primal_ray_, constraints_dual_ray_, and
+  // variable_bounds_dual_ray_ are modified directly by
+  // RunRevisedSimplexIfNeeded(), so we explicitly clear them from previous run
+  // results.
+  primal_ray_.clear();
+  constraints_dual_ray_.clear();
+  variable_bounds_dual_ray_.clear();
 
   // Do not launch the solver if the time limit was already reached. This might
   // mean that the pre-processors were not all run, and current_linear_program_
@@ -216,18 +254,17 @@ ProblemStatus LPSolver::SolveWithTimeLimit(const LinearProgram& lp,
   if (!time_limit->LimitReached()) {
     RunRevisedSimplexIfNeeded(&solution, time_limit);
   }
-
   if (postsolve_is_needed) preprocessor.DestructiveRecoverSolution(&solution);
   const ProblemStatus status = LoadAndVerifySolution(lp, solution);
-
   // LOG some statistics that can be parsed by our benchmark script.
-  if (log_info) {
-    LOG(INFO) << "status: " << status;
-    LOG(INFO) << "objective: " << GetObjectiveValue();
-    LOG(INFO) << "iterations: " << GetNumberOfSimplexIterations();
-    LOG(INFO) << "time: " << time_limit->GetElapsedTime();
-    LOG(INFO) << "deterministic_time: "
-              << time_limit->GetElapsedDeterministicTime();
+  if (logger_.LoggingIsEnabled()) {
+    SOLVER_LOG(&logger_, "status: ", GetProblemStatusString(status));
+    SOLVER_LOG(&logger_, "objective: ", GetObjectiveValue());
+    SOLVER_LOG(&logger_, "iterations: ", GetNumberOfSimplexIterations());
+    SOLVER_LOG(&logger_, "time: ", time_limit->GetElapsedTime());
+    SOLVER_LOG(&logger_, "deterministic_time: ",
+               time_limit->GetElapsedDeterministicTime());
+    SOLVER_LOG(&logger_, "");
   }
 
   return status;
@@ -266,7 +303,8 @@ void LPSolver::SetInitialBasis(
     }
   }
   if (revised_simplex_ == nullptr) {
-    revised_simplex_ = absl::make_unique<RevisedSimplex>();
+    revised_simplex_ = std::make_unique<RevisedSimplex>();
+    revised_simplex_->SetLogger(&logger_);
   }
   revised_simplex_->LoadStateForNextSolve(state);
   if (parameters_.use_preprocessing()) {
@@ -294,10 +332,11 @@ Fractional AllowedError(Fractional tolerance, Fractional value) {
 // return status.
 ProblemStatus LPSolver::LoadAndVerifySolution(const LinearProgram& lp,
                                               const ProblemSolution& solution) {
-  const bool log_info = parameters_.log_search_progress() || VLOG_IS_ON(1);
+  SOLVER_LOG(&logger_, "");
+  SOLVER_LOG(&logger_, "Final unscaled solution:");
 
   if (!IsProblemSolutionConsistent(lp, solution)) {
-    if (log_info) LOG(INFO) << "Inconsistency detected in the solution.";
+    SOLVER_LOG(&logger_, "Inconsistency detected in the solution.");
     ResizeSolution(lp.num_constraints(), lp.num_variables());
     return ProblemStatus::ABNORMAL;
   }
@@ -307,6 +346,7 @@ ProblemStatus LPSolver::LoadAndVerifySolution(const LinearProgram& lp,
   dual_values_ = solution.dual_values;
   variable_statuses_ = solution.variable_statuses;
   constraint_statuses_ = solution.constraint_statuses;
+
   ProblemStatus status = solution.status;
 
   // Objective before eventually moving the primal/dual values inside their
@@ -314,14 +354,12 @@ ProblemStatus LPSolver::LoadAndVerifySolution(const LinearProgram& lp,
   ComputeReducedCosts(lp);
   const Fractional primal_objective_value = ComputeObjective(lp);
   const Fractional dual_objective_value = ComputeDualObjective(lp);
-  if (log_info) {
-    LOG(INFO) << "Primal objective (before moving primal/dual values) = "
-              << absl::StrFormat("%.15E", ProblemObjectiveValue(
-                                              lp, primal_objective_value));
-    LOG(INFO) << "Dual objective (before moving primal/dual values) = "
-              << absl::StrFormat(
-                     "%.15E", ProblemObjectiveValue(lp, dual_objective_value));
-  }
+  SOLVER_LOG(&logger_, "Primal objective (before moving primal/dual values) = ",
+             absl::StrFormat(
+                 "%.15E", ProblemObjectiveValue(lp, primal_objective_value)));
+  SOLVER_LOG(&logger_, "Dual objective (before moving primal/dual values) = ",
+             absl::StrFormat("%.15E",
+                             ProblemObjectiveValue(lp, dual_objective_value)));
 
   // Eventually move the primal/dual values inside their bounds.
   if (status == ProblemStatus::OPTIMAL &&
@@ -332,10 +370,8 @@ ProblemStatus LPSolver::LoadAndVerifySolution(const LinearProgram& lp,
 
   // The reported objective to the user.
   problem_objective_value_ = ProblemObjectiveValue(lp, ComputeObjective(lp));
-  if (log_info) {
-    LOG(INFO) << "Primal objective (after moving primal/dual values) = "
-              << absl::StrFormat("%.15E", problem_objective_value_);
-  }
+  SOLVER_LOG(&logger_, "Primal objective (after moving primal/dual values) = ",
+             absl::StrFormat("%.15E", problem_objective_value_));
 
   ComputeReducedCosts(lp);
   ComputeConstraintActivities(lp);
@@ -376,20 +412,16 @@ ProblemStatus LPSolver::LoadAndVerifySolution(const LinearProgram& lp,
       std::max(primal_infeasibility, primal_residual);
   max_absolute_dual_infeasibility_ =
       std::max(dual_infeasibility, dual_residual);
-  if (log_info) {
-    LOG(INFO) << "Max. primal infeasibility = "
-              << max_absolute_primal_infeasibility_;
-    LOG(INFO) << "Max. dual infeasibility = "
-              << max_absolute_dual_infeasibility_;
-  }
+  SOLVER_LOG(&logger_, "Max. primal infeasibility = ",
+             max_absolute_primal_infeasibility_);
+  SOLVER_LOG(&logger_,
+             "Max. dual infeasibility = ", max_absolute_dual_infeasibility_);
 
   // Now that all the relevant quantities are computed, we check the precision
   // and optimality of the result. See Chvatal pp. 61-62. If any of the tests
   // fail, we return the IMPRECISE status.
   const double objective_error_ub = ComputeMaxExpectedObjectiveError(lp);
-  if (log_info) {
-    LOG(INFO) << "Objective error <= " << objective_error_ub;
-  }
+  SOLVER_LOG(&logger_, "Objective error <= ", objective_error_ub);
 
   if (status == ProblemStatus::OPTIMAL &&
       parameters_.provide_strong_optimal_guarantee()) {
@@ -404,12 +436,16 @@ ProblemStatus LPSolver::LoadAndVerifySolution(const LinearProgram& lp,
                  << "MoveDualValuesWithinBounds().";
     }
     if (rhs_perturbation_is_too_large) {
-      if (log_info) LOG(INFO) << "The needed rhs perturbation is too large !!";
-      status = ProblemStatus::IMPRECISE;
+      SOLVER_LOG(&logger_, "The needed rhs perturbation is too large !!");
+      if (parameters_.change_status_to_imprecise()) {
+        status = ProblemStatus::IMPRECISE;
+      }
     }
     if (cost_perturbation_is_too_large) {
-      if (log_info) LOG(INFO) << "The needed cost perturbation is too large !!";
-      status = ProblemStatus::IMPRECISE;
+      SOLVER_LOG(&logger_, "The needed cost perturbation is too large !!");
+      if (parameters_.change_status_to_imprecise()) {
+        status = ProblemStatus::IMPRECISE;
+      }
     }
   }
 
@@ -419,28 +455,30 @@ ProblemStatus LPSolver::LoadAndVerifySolution(const LinearProgram& lp,
   if (status == ProblemStatus::OPTIMAL) {
     if (std::abs(primal_objective_value - dual_objective_value) >
         objective_error_ub) {
-      if (log_info) {
-        LOG(INFO) << "The objective gap of the final solution is too large.";
+      SOLVER_LOG(&logger_,
+                 "The objective gap of the final solution is too large.");
+      if (parameters_.change_status_to_imprecise()) {
+        status = ProblemStatus::IMPRECISE;
       }
-      status = ProblemStatus::IMPRECISE;
     }
   }
   if ((status == ProblemStatus::OPTIMAL ||
        status == ProblemStatus::PRIMAL_FEASIBLE) &&
       (primal_residual_is_too_large || primal_infeasibility_is_too_large)) {
-    if (log_info) {
-      LOG(INFO)
-          << "The primal infeasibility of the final solution is too large.";
+    SOLVER_LOG(&logger_,
+               "The primal infeasibility of the final solution is too large.");
+    if (parameters_.change_status_to_imprecise()) {
+      status = ProblemStatus::IMPRECISE;
     }
-    status = ProblemStatus::IMPRECISE;
   }
   if ((status == ProblemStatus::OPTIMAL ||
        status == ProblemStatus::DUAL_FEASIBLE) &&
       (dual_residual_is_too_large || dual_infeasibility_is_too_large)) {
-    if (log_info) {
-      LOG(INFO) << "The dual infeasibility of the final solution is too large.";
+    SOLVER_LOG(&logger_,
+               "The dual infeasibility of the final solution is too large.");
+    if (parameters_.change_status_to_imprecise()) {
+      status = ProblemStatus::IMPRECISE;
     }
-    status = ProblemStatus::IMPRECISE;
   }
 
   may_have_multiple_solutions_ =
@@ -523,8 +561,7 @@ void LPSolver::MovePrimalValuesWithinBounds(const LinearProgram& lp) {
     primal_values_[col] = std::min(primal_values_[col], upper_bound);
     primal_values_[col] = std::max(primal_values_[col], lower_bound);
   }
-  const bool log_info = parameters_.log_search_progress() || VLOG_IS_ON(1);
-  if (log_info) LOG(INFO) << "Max. primal values move = " << error;
+  SOLVER_LOG(&logger_, "Max. primal values move = ", error);
 }
 
 void LPSolver::MoveDualValuesWithinBounds(const LinearProgram& lp) {
@@ -548,8 +585,7 @@ void LPSolver::MoveDualValuesWithinBounds(const LinearProgram& lp) {
     }
     dual_values_[row] = optimization_sign * minimization_dual_value;
   }
-  const bool log_info = parameters_.log_search_progress() || VLOG_IS_ON(1);
-  if (log_info) LOG(INFO) << "Max. dual values move = " << error;
+  SOLVER_LOG(&logger_, "Max. dual values move = ", error);
 }
 
 void LPSolver::ResizeSolution(RowIndex num_rows, ColIndex num_cols) {
@@ -574,7 +610,8 @@ void LPSolver::RunRevisedSimplexIfNeeded(ProblemSolution* solution,
   current_linear_program_.ClearTransposeMatrix();
   if (solution->status != ProblemStatus::INIT) return;
   if (revised_simplex_ == nullptr) {
-    revised_simplex_ = absl::make_unique<RevisedSimplex>();
+    revised_simplex_ = std::make_unique<RevisedSimplex>();
+    revised_simplex_->SetLogger(&logger_);
   }
   revised_simplex_->SetParameters(parameters_);
   if (revised_simplex_->Solve(current_linear_program_, time_limit).ok()) {
@@ -589,7 +626,6 @@ void LPSolver::RunRevisedSimplexIfNeeded(ProblemSolution* solution,
       solution->variable_statuses[col] =
           revised_simplex_->GetVariableStatus(col);
     }
-
     const RowIndex num_rows = revised_simplex_->GetProblemNumRows();
     DCHECK_EQ(solution->dual_values.size(), num_rows);
     for (RowIndex row(0); row < num_rows; ++row) {
@@ -597,9 +633,36 @@ void LPSolver::RunRevisedSimplexIfNeeded(ProblemSolution* solution,
       solution->constraint_statuses[row] =
           revised_simplex_->GetConstraintStatus(row);
     }
+    if (!parameters_.use_preprocessing() && !parameters_.use_scaling()) {
+      if (solution->status == ProblemStatus::PRIMAL_UNBOUNDED) {
+        primal_ray_ = revised_simplex_->GetPrimalRay();
+        // Make sure we do not copy the slacks added by revised_simplex_.
+        primal_ray_.resize(num_cols);
+      } else if (solution->status == ProblemStatus::DUAL_UNBOUNDED) {
+        constraints_dual_ray_ = revised_simplex_->GetDualRay();
+        variable_bounds_dual_ray_ =
+            revised_simplex_->GetDualRayRowCombination();
+        // Make sure we do not copy the slacks added by revised_simplex_.
+        variable_bounds_dual_ray_.resize(num_cols);
+        // Revised simplex's GetDualRay is always such that GetDualRay.rhs < 0,
+        // which is a cost improving direction for the dual if the primal is a
+        // maximization problem (i.e. when the dual is a minimization problem).
+        // Hence, we change the sign of constraints_dual_ray_ for min problems.
+        //
+        // Revised simplex's GetDualRayRowCombination = A^T GetDualRay and
+        // we must have variable_bounds_dual_ray_ = - A^T constraints_dual_ray_.
+        // Then we need to change the sign of variable_bounds_dual_ray_, but for
+        // min problems this change is implicit because of the sign change of
+        // constraints_dual_ray_ described above.
+        if (current_linear_program_.IsMaximizationProblem()) {
+          ChangeSign(&variable_bounds_dual_ray_);
+        } else {
+          ChangeSign(&constraints_dual_ray_);
+        }
+      }
+    }
   } else {
-    const bool log_info = parameters_.log_search_progress() || VLOG_IS_ON(1);
-    if (log_info) LOG(INFO) << "Error during the revised simplex algorithm.";
+    SOLVER_LOG(&logger_, "Error during the revised simplex algorithm.");
     solution->status = ProblemStatus::ABNORMAL;
   }
 }
@@ -776,8 +839,7 @@ Fractional LPSolver::ComputeMaxCostPerturbationToEnforceOptimality(
           AllowedError(tolerance, lp.objective_coefficients()[col]);
     }
   }
-  const bool log_info = parameters_.log_search_progress() || VLOG_IS_ON(1);
-  if (log_info) LOG(INFO) << "Max. cost perturbation = " << max_cost_correction;
+  SOLVER_LOG(&logger_, "Max. cost perturbation = ", max_cost_correction);
   return max_cost_correction;
 }
 
@@ -807,8 +869,7 @@ Fractional LPSolver::ComputeMaxRhsPerturbationToEnforceOptimality(
     max_rhs_correction = std::max(max_rhs_correction, rhs_error);
     *is_too_large |= rhs_error > allowed_error;
   }
-  const bool log_info = parameters_.log_search_progress() || VLOG_IS_ON(1);
-  if (log_info) LOG(INFO) << "Max. rhs perturbation = " << max_rhs_correction;
+  SOLVER_LOG(&logger_, "Max. rhs perturbation = ", max_rhs_correction);
   return max_rhs_correction;
 }
 

@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -11,7 +11,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <stdlib.h>
+
+#include <vector>
+
+#include "ortools/base/logging.h"
 #include "ortools/sat/cp_model.h"
+#include "ortools/sat/cp_model.pb.h"
+#include "ortools/sat/cp_model_solver.h"
 
 namespace operations_research {
 namespace sat {
@@ -54,7 +61,7 @@ void BinpackingProblemSat() {
   for (int b = 0; b < kNumBins; ++b) {
     LinearExpr expr;
     for (int i = 0; i < num_items; ++i) {
-      expr.AddTerm(x[i][b], items[i][0]);
+      expr += x[i][b] * items[i][0];
     }
     cp_model.AddEquality(expr, load[b]);
   }
@@ -70,12 +77,11 @@ void BinpackingProblemSat() {
     // slack[b] => load[b] <= safe_capacity.
     cp_model.AddLessOrEqual(load[b], safe_capacity).OnlyEnforceIf(slacks[b]);
     // not(slack[b]) => load[b] > safe_capacity.
-    cp_model.AddGreaterThan(load[b], safe_capacity)
-        .OnlyEnforceIf(Not(slacks[b]));
+    cp_model.AddGreaterThan(load[b], safe_capacity).OnlyEnforceIf(~slacks[b]);
   }
 
   // Maximize sum of slacks.
-  cp_model.Maximize(LinearExpr::BooleanSum(slacks));
+  cp_model.Maximize(LinearExpr::Sum(slacks));
 
   // Solving part.
   const CpSolverResponse response = Solve(cp_model.Build());

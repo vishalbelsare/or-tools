@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -11,7 +11,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <stdlib.h>
+
+#include "ortools/base/logging.h"
 #include "ortools/sat/cp_model.h"
+#include "ortools/util/sorted_interval_list.h"
 
 namespace operations_research {
 namespace sat {
@@ -27,8 +31,7 @@ void IntervalSampleSat() {
   const IntVar z = cp_model.NewIntVar(horizon).WithName("z");
 
   const IntervalVar interval_var =
-      cp_model.NewIntervalVar(x, y, LinearExpr(z).AddConstant(2))
-          .WithName("interval");
+      cp_model.NewIntervalVar(x, y, z + 2).WithName("interval");
   LOG(INFO) << "start = " << interval_var.StartExpr()
             << ", size = " << interval_var.SizeExpr()
             << ", end = " << interval_var.EndExpr()

@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -28,12 +28,9 @@
 // - examples/csharp/cslinearprogramming.cs
 // - examples/csharp/csintegerprogramming.cs
 
-%include "enums.swg"
-%include "stdint.i"
-%include "std_vector.i"
-
 %include "ortools/base/base.i"
-%include "ortools/util/csharp/vector.i"
+%include "enums.swg"
+%import "ortools/util/csharp/vector.i"
 
 %{
 #include "ortools/linear_solver/linear_solver.h"
@@ -41,6 +38,8 @@
 #include "ortools/linear_solver/model_exporter.h"
 %}
 
+%template(DoubleVector) std::vector<double>;
+VECTOR_AS_CSHARP_ARRAY(double, double, double, DoubleVector);
 
 // We need to forward-declare the proto here, so that the PROTO_* macros
 // involving them work correctly. The order matters very much: this declaration
@@ -58,9 +57,6 @@ class MPSolutionResponse;
 
 %typemap(csclassmodifiers) operations_research::MPVariable "public partial class"
 %typemap(csclassmodifiers) operations_research::MPSolver "public partial class"
-
-%template(DoubleVector) std::vector<double>;
-VECTOR_AS_CSHARP_ARRAY(double, double, double, DoubleVector);
 
 %define CONVERT_VECTOR(CTYPE, TYPE)
 SWIG_STD_VECTOR_ENHANCED(CTYPE*);
@@ -82,12 +78,14 @@ CONVERT_VECTOR(operations_research::MPVariable, MPVariable)
 %rename (Constraint) operations_research::MPConstraint;
 %rename (Objective) operations_research::MPObjective;
 %rename (SolverParameters) operations_research::MPSolverParameters;
+%unignore operations_research::MPSolver::SolverVersion;
 
 // Expose the MPSolver::OptimizationProblemType enum.
 %unignore operations_research::MPSolver::OptimizationProblemType;
 %unignore operations_research::MPSolver::CLP_LINEAR_PROGRAMMING;
 %unignore operations_research::MPSolver::GLOP_LINEAR_PROGRAMMING;
 %unignore operations_research::MPSolver::GLPK_LINEAR_PROGRAMMING;
+%unignore operations_research::MPSolver::PDLP_LINEAR_PROGRAMMING;
 %unignore operations_research::MPSolver::SCIP_MIXED_INTEGER_PROGRAMMING;
 %unignore operations_research::MPSolver::CBC_MIXED_INTEGER_PROGRAMMING;
 %unignore operations_research::MPSolver::GLPK_MIXED_INTEGER_PROGRAMMING;
@@ -107,6 +105,7 @@ CONVERT_VECTOR(operations_research::MPVariable, MPVariable)
 %unignore operations_research::MPSolver::INFEASIBLE;
 %unignore operations_research::MPSolver::UNBOUNDED;
 %unignore operations_research::MPSolver::ABNORMAL;
+%unignore operations_research::MPSolver::MODEL_INVALID;
 %unignore operations_research::MPSolver::NOT_SOLVED;
 
 // Expose the MPSolver's basic API, with some non-trivial renames.
@@ -148,6 +147,7 @@ CONVERT_VECTOR(operations_research::MPVariable, MPVariable)
 %unignore operations_research::MPSolver::variables;
 %unignore operations_research::MPSolver::EnableOutput;
 %unignore operations_research::MPSolver::SuppressOutput;
+%rename (IsMip) operations_research::MPSolver::IsMIP;
 %unignore operations_research::MPSolver::LookupConstraintOrNull;
 %unignore operations_research::MPSolver::LookupVariableOrNull;
 

@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -13,7 +13,23 @@
 
 #include "ortools/glop/reduced_costs.h"
 
+#include <algorithm>
+#include <cstdlib>
 #include <random>
+
+#include "absl/log/check.h"
+#include "absl/random/bit_gen_ref.h"
+#include "ortools/base/logging.h"
+#include "ortools/glop/basis_representation.h"
+#include "ortools/glop/parameters.pb.h"
+#include "ortools/glop/primal_edge_norms.h"
+#include "ortools/glop/update_row.h"
+#include "ortools/glop/variables_info.h"
+#include "ortools/lp_data/lp_types.h"
+#include "ortools/lp_data/scattered_vector.h"
+#include "ortools/lp_data/sparse.h"
+#include "ortools/util/bitset.h"
+#include "ortools/util/stats.h"
 
 #ifdef OMP
 #include <omp.h>
@@ -62,7 +78,7 @@ Fractional ReducedCosts::TestEnteringReducedCostPrecision(
   const Fractional old_reduced_cost = reduced_costs_[entering_col];
   const Fractional precise_reduced_cost =
       objective_[entering_col] + cost_perturbations_[entering_col] -
-      PreciseScalarProduct(basic_objective_, direction);
+      ScalarProduct(basic_objective_, direction);
 
   // Update the reduced cost of the entering variable with the precise version.
   reduced_costs_[entering_col] = precise_reduced_cost;
@@ -308,7 +324,7 @@ void ReducedCosts::ClearAndRemoveCostShifts() {
   SetRecomputeReducedCostsAndNotifyWatchers();
 }
 
-const DenseRow& ReducedCosts::GetFullReducedCosts() {
+DenseRow::ConstView ReducedCosts::GetFullReducedCosts() {
   SCOPED_TIME_STAT(&stats_);
   if (!are_reduced_costs_recomputed_) {
     SetRecomputeReducedCostsAndNotifyWatchers();
@@ -316,7 +332,7 @@ const DenseRow& ReducedCosts::GetFullReducedCosts() {
   return GetReducedCosts();
 }
 
-const DenseRow& ReducedCosts::GetReducedCosts() {
+DenseRow::ConstView ReducedCosts::GetReducedCosts() {
   SCOPED_TIME_STAT(&stats_);
   if (basis_factorization_.IsRefactorized()) {
     must_refactorize_basis_ = false;
@@ -324,7 +340,7 @@ const DenseRow& ReducedCosts::GetReducedCosts() {
   if (recompute_reduced_costs_) {
     ComputeReducedCosts();
   }
-  return reduced_costs_;
+  return reduced_costs_.const_view();
 }
 
 const DenseColumn& ReducedCosts::GetDualValues() {
@@ -408,7 +424,7 @@ void ReducedCosts::ComputeReducedCosts() {
   are_reduced_costs_recomputed_ = true;
   are_reduced_costs_precise_ = basis_factorization_.IsRefactorized();
 
-  // It is not resonable to have a dual tolerance lower than the current
+  // It is not reasonable to have a dual tolerance lower than the current
   // dual_residual_error, otherwise we may never terminate (This is happening on
   // dfl001.mps with a low dual_feasibility_tolerance). Note that since we
   // recompute the reduced costs with maximum precision before really exiting,
@@ -473,16 +489,17 @@ void ReducedCosts::UpdateReducedCosts(ColIndex entering_col,
   // The edge of the 'leaving_col' in the new basis is equal to
   // 'entering_edge / -pivot'.
   const Fractional new_leaving_reduced_cost = entering_reduced_cost / -pivot;
+  auto rc = reduced_costs_.view();
+  auto update_coeffs = update_row->GetCoefficients().const_view();
   for (const ColIndex col : update_row->GetNonZeroPositions()) {
-    const Fractional coeff = update_row->GetCoefficient(col);
-    reduced_costs_[col] += new_leaving_reduced_cost * coeff;
+    rc[col] += new_leaving_reduced_cost * update_coeffs[col];
   }
-  reduced_costs_[leaving_col] = new_leaving_reduced_cost;
+  rc[leaving_col] = new_leaving_reduced_cost;
 
   // In the dual, since we compute the update before selecting the entering
   // variable, this cost is still in the update_position_list, so we make sure
   // it is 0 here.
-  reduced_costs_[entering_col] = 0.0;
+  rc[entering_col] = 0.0;
 }
 
 bool ReducedCosts::IsValidPrimalEnteringCandidate(ColIndex col) const {
@@ -529,13 +546,18 @@ void PrimalPrices::UpdateBeforeBasisPivot(ColIndex entering_col,
   // given by the update_row.
   UpdateEnteringCandidates</*from_clean_state=*/false>(
       update_row->GetNonZeroPositions());
+
+  // This should be redundant with the call above, except in degenerate
+  // cases where the update_row has a zero position on the entering col!
+  prices_.Remove(entering_col);
 }
 
 void PrimalPrices::RecomputePriceAt(ColIndex col) {
   if (recompute_) return;
   if (reduced_costs_->IsValidPrimalEnteringCandidate(col)) {
-    const DenseRow& squared_norms = primal_edge_norms_->GetSquaredNorms();
-    const DenseRow& reduced_costs = reduced_costs_->GetReducedCosts();
+    const DenseRow::ConstView squared_norms =
+        primal_edge_norms_->GetSquaredNorms();
+    const DenseRow::ConstView reduced_costs = reduced_costs_->GetReducedCosts();
     DCHECK_NE(0.0, squared_norms[col]);
     prices_.AddOrUpdate(col, Square(reduced_costs[col]) / squared_norms[col]);
   } else {
@@ -554,7 +576,7 @@ void PrimalPrices::SetAndDebugCheckThatColumnIsDualFeasible(ColIndex col) {
 
 ColIndex PrimalPrices::GetBestEnteringColumn() {
   if (recompute_) {
-    const DenseRow& reduced_costs = reduced_costs_->GetReducedCosts();
+    const DenseRow::ConstView reduced_costs = reduced_costs_->GetReducedCosts();
     prices_.ClearAndResize(reduced_costs.size());
     UpdateEnteringCandidates</*from_clean_state=*/true>(
         variables_info_.GetIsRelevantBitRow());
@@ -571,10 +593,13 @@ ColIndex PrimalPrices::GetBestEnteringColumn() {
 template <bool from_clean_state, typename ColumnsToUpdate>
 void PrimalPrices::UpdateEnteringCandidates(const ColumnsToUpdate& cols) {
   const Fractional tolerance = reduced_costs_->GetDualFeasibilityTolerance();
-  const DenseBitRow& can_decrease = variables_info_.GetCanDecreaseBitRow();
-  const DenseBitRow& can_increase = variables_info_.GetCanIncreaseBitRow();
-  const DenseRow& squared_norms = primal_edge_norms_->GetSquaredNorms();
-  const DenseRow& reduced_costs = reduced_costs_->GetReducedCosts();
+  const DenseBitRow::ConstView can_decrease =
+      variables_info_.GetCanDecreaseBitRow().const_view();
+  const DenseBitRow::ConstView can_increase =
+      variables_info_.GetCanIncreaseBitRow().const_view();
+  const DenseRow::ConstView squared_norms =
+      primal_edge_norms_->GetSquaredNorms();
+  const DenseRow::ConstView reduced_costs = reduced_costs_->GetReducedCosts();
   for (const ColIndex col : cols) {
     const Fractional reduced_cost = reduced_costs[col];
 

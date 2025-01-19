@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -17,8 +17,7 @@ using System.Runtime.InteropServices;
 using System.Collections;
 %}
 
-
-%include "ortools/base/base.i"
+%module(directors="1") operations_research_util
 
 %include "ortools/util/csharp/vector.i"
 
@@ -26,7 +25,13 @@ using System.Collections;
 #include "ortools/util/sorted_interval_list.h"
 %}
 
-%module(directors="1") operations_research_util
+/* allow partial c# classes */
+%typemap(csclassmodifiers) SWIGTYPE "public partial class"
+%template(Int64Vector) std::vector<int64_t>;
+%template(Int64VectorVector) std::vector<std::vector<int64_t> >;
+
+VECTOR_AS_CSHARP_ARRAY(int64_t, int64_t, long, Int64Vector);
+JAGGED_MATRIX_AS_CSHARP_ARRAY(int64_t, int64_t, long, Int64VectorVector);
 
 %ignoreall
 
@@ -53,6 +58,7 @@ using System.Collections;
 %unignore operations_research::Domain::Min;
 %unignore operations_research::Domain::Negation;
 %unignore operations_research::Domain::Size;
+%csmethodmodifiers operations_research::Domain::ToString "public override";
 %unignore operations_research::Domain::ToString;
 %unignore operations_research::Domain::UnionWith;
 

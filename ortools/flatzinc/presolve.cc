@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -16,16 +16,16 @@
 #include <cstdint>
 #include <map>
 #include <set>
+#include <string>
+#include <vector>
 
-#include "absl/strings/match.h"
-#include "absl/strings/str_format.h"
-#include "absl/strings/str_join.h"
+#include "absl/container/flat_hash_set.h"
+#include "absl/flags/flag.h"
+#include "absl/log/check.h"
 #include "absl/strings/string_view.h"
-#include "ortools/base/map_util.h"
+#include "absl/types/span.h"
 #include "ortools/flatzinc/model.h"
-#include "ortools/graph/cliques.h"
-#include "ortools/util/saturated_arithmetic.h"
-#include "ortools/util/vector_map.h"
+#include "ortools/util/logging.h"
 
 ABSL_FLAG(bool, fz_floats_are_ints, false,
           "Interpret floats as integers in all variables and constraints.");
@@ -108,6 +108,19 @@ void Presolver::PresolveBool2Int(Constraint* ct) {
   }
 }
 
+// Propagates cast constraint.
+// Rule 1:
+// Input: int2float(x, y)
+// Action: Replace all instances of y by x.
+// Output: inactive constraint
+void Presolver::PresolveInt2Float(Constraint* ct) {
+  DCHECK_EQ(ct->type, "int2float");
+  // Rule 1.
+  UpdateRuleStats("int2float: merge integer and floating point variables.");
+  AddVariableSubstitution(ct->arguments[1].Var(), ct->arguments[0].Var());
+  ct->MarkAsInactive();
+}
+
 // Minizinc flattens 2d element constraints (x = A[y][z]) into 1d element
 // constraint with an affine mapping between y, z and the new index.
 // This rule stores the mapping to reconstruct the 2d element constraint.
@@ -161,7 +174,7 @@ void Presolver::PresolveStoreFlatteningMapping(Constraint* ct) {
 }
 
 namespace {
-bool IsIncreasingAndContiguous(const std::vector<int64_t>& values) {
+bool IsIncreasingAndContiguous(absl::Span<const int64_t> values) {
   for (int i = 0; i < values.size() - 1; ++i) {
     if (values[i + 1] != values[i] + 1) {
       return false;
@@ -426,6 +439,8 @@ void Presolver::Run(Model* model) {
   for (Constraint* const ct : model->constraints()) {
     if (ct->active && ct->type == "bool2int") {
       PresolveBool2Int(ct);
+    } else if (ct->active && ct->type == "int2float") {
+      PresolveInt2Float(ct);
     } else if (ct->active && ct->type == "int_lin_eq" &&
                ct->arguments[1].variables.size() == 2 &&
                ct->strong_propagation) {
@@ -452,6 +467,47 @@ void Presolver::Run(Model* model) {
         ct->type == "array_var_bool_element") {
       PresolveSimplifyExprElement(ct);
     }
+  }
+
+  // Third pass: process objective with floating point coefficients.
+  Variable* float_objective_var = nullptr;
+  for (Variable* var : model->variables()) {
+    if (!var->active) continue;
+    if (var->domain.is_float) {
+      CHECK(float_objective_var == nullptr);
+      float_objective_var = var;
+    }
+  }
+
+  Constraint* float_objective_ct = nullptr;
+  if (float_objective_var != nullptr) {
+    for (Constraint* ct : model->constraints()) {
+      if (!ct->active) continue;
+      if (ct->type == "float_lin_eq") {
+        CHECK(float_objective_ct == nullptr);
+        float_objective_ct = ct;
+        break;
+      }
+    }
+  }
+
+  if (float_objective_ct != nullptr || float_objective_var != nullptr) {
+    CHECK(float_objective_ct != nullptr);
+    CHECK(float_objective_var != nullptr);
+    const int arity = float_objective_ct->arguments[0].Size();
+    CHECK_EQ(float_objective_ct->arguments[1].variables[arity - 1],
+             float_objective_var);
+    CHECK_EQ(float_objective_ct->arguments[0].floats[arity - 1], -1.0);
+    for (int i = 0; i + 1 < arity; ++i) {
+      model->AddFloatingPointObjectiveTerm(
+          float_objective_ct->arguments[1].variables[i],
+          float_objective_ct->arguments[0].floats[i]);
+    }
+    model->SetFloatingPointObjectiveOffset(
+        -float_objective_ct->arguments[2].floats[0]);
+    model->ClearObjective();
+    float_objective_var->active = false;
+    float_objective_ct->active = false;
   }
 
   // Report presolve rules statistics.
@@ -494,7 +550,8 @@ Variable* Presolver::FindRepresentativeOfVar(Variable* var) {
   Variable* start_var = var;
   // First loop: find the top parent.
   for (;;) {
-    Variable* parent = gtl::FindWithDefault(var_representative_map_, var, var);
+    const auto& it = var_representative_map_.find(var);
+    Variable* parent = it == var_representative_map_.end() ? var : it->second;
     if (parent == var) break;
     var = parent;
   }
@@ -504,7 +561,8 @@ Variable* Presolver::FindRepresentativeOfVar(Variable* var) {
     var_representative_map_[start_var] = var;
     start_var = parent;
   }
-  return gtl::FindWithDefault(var_representative_map_, var, var);
+  const auto& iter = var_representative_map_.find(var);
+  return iter == var_representative_map_.end() ? var : iter->second;
 }
 
 void Presolver::SubstituteEverywhere(Model* model) {

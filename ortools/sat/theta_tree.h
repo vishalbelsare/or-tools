@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -207,7 +207,7 @@ class ThetaLambdaTree {
     IntegerType max_of_energy_delta;
   };
 
-  TreeNode ComposeTreeNodes(TreeNode left, TreeNode right);
+  TreeNode ComposeTreeNodes(const TreeNode& left, const TreeNode& right);
 
   int GetLeafFromEvent(int event) const;
   int GetEventFromLeaf(int leaf) const;
@@ -244,7 +244,7 @@ class ThetaLambdaTree {
   std::vector<TreeNode> tree_;
 };
 
-// Explicit instantiations in theta_Tree.cc.
+// Explicit instantiations in theta_tree.cc.
 extern template class ThetaLambdaTree<IntegerValue>;
 extern template class ThetaLambdaTree<int64_t>;
 

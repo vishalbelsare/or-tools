@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -16,19 +16,22 @@
 #include <stddef.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include "absl/base/attributes.h"
+#include "absl/cleanup/cleanup.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_format.h"
 #include "absl/types/optional.h"
-#include "ortools/base/cleanup.h"
 #include "ortools/base/commandlineflags.h"
 #include "ortools/base/hash.h"
-#include "ortools/base/integral_types.h"
 #include "ortools/base/logging.h"
 #include "ortools/base/status_macros.h"
 #include "ortools/base/timer.h"
@@ -36,12 +39,15 @@
 #include "ortools/linear_solver/linear_solver.h"
 #include "ortools/linear_solver/linear_solver.pb.h"
 #include "ortools/linear_solver/linear_solver_callback.h"
+#include "ortools/linear_solver/proto_solver/proto_utils.h"
+#include "ortools/linear_solver/proto_solver/scip_proto_solver.h"
 #include "ortools/linear_solver/scip_callback.h"
 #include "ortools/linear_solver/scip_helper_macros.h"
-#include "ortools/linear_solver/scip_proto_solver.h"
+#include "ortools/util/lazy_mutable_copy.h"
 #include "scip/cons_indicator.h"
 #include "scip/scip.h"
 #include "scip/scip_copy.h"
+#include "scip/scip_numerics.h"
 #include "scip/scip_param.h"
 #include "scip/scip_prob.h"
 #include "scip/scipdefplugins.h"
@@ -65,9 +71,14 @@ class SCIPInterface : public MPSolverInterface {
 
   void SetOptimizationDirection(bool maximize) override;
   MPSolver::ResultStatus Solve(const MPSolverParameters& param) override;
-  absl::optional<MPSolutionResponse> DirectlySolveProto(
-      const MPModelRequest& request, std::atomic<bool>* interrupt) override;
+
+  bool SupportsDirectlySolveProto(std::atomic<bool>* interrupt) const override;
+  MPSolutionResponse DirectlySolveProto(LazyMutableCopy<MPModelRequest> request,
+                                        std::atomic<bool>* interrupt) override;
+
   void Reset() override;
+
+  double infinity() override;
 
   void SetVariableBounds(int var_index, double lb, double ub) override;
   void SetVariableInteger(int var_index, bool integer) override;
@@ -142,8 +153,7 @@ class SCIPInterface : public MPSolverInterface {
   //  * We also support SCIP's more general callback interface, built on
   //    'constraint handlers'. See ./scip_callback.h and test, these are added
   //    directly to the underlying SCIP object, bypassing SCIPInterface.
-  // The former works by calling the latter. See go/scip-callbacks for
-  // a complete documentation of this design.
+  // The former works by calling the latter.
 
   // MPCallback API
   void SetCallback(MPCallback* mp_callback) override;
@@ -222,12 +232,11 @@ class ScipConstraintHandlerForMPCallback
   std::vector<CallbackRangeConstraint> SeparateIntegerSolution(
       const ScipConstraintHandlerContext& context, const EmptyStruct&) override;
 
-  MPCallback* const mp_callback() const { return mp_callback_; }
+  MPCallback* mp_callback() const { return mp_callback_; }
 
  private:
   std::vector<CallbackRangeConstraint> SeparateSolution(
-      const ScipConstraintHandlerContext& context,
-      const bool at_integer_solution);
+      const ScipConstraintHandlerContext& context, bool at_integer_solution);
 
   MPCallback* const mp_callback_;
 };
@@ -304,6 +313,8 @@ absl::Status SCIPInterface::CreateSCIP() {
       scip_, maximize_ ? SCIP_OBJSENSE_MAXIMIZE : SCIP_OBJSENSE_MINIMIZE));
   return absl::OkStatus();
 }
+
+double SCIPInterface::infinity() { return SCIPinfinity(scip_); }
 
 SCIP* SCIPInterface::DeleteSCIP(bool return_scip) {
   // NOTE(user): DeleteSCIP() shouldn't "give up" mid-stage if it fails, since
@@ -713,7 +724,7 @@ MPSolver::ResultStatus SCIPInterface::Solve(const MPSolverParameters& param) {
     CHECK_EQ(scip_constraint_handler_->mp_callback(), callback_);
   } else if (callback_ != nullptr) {
     scip_constraint_handler_ =
-        absl::make_unique<ScipConstraintHandlerForMPCallback>(callback_);
+        std::make_unique<ScipConstraintHandlerForMPCallback>(callback_);
     RegisterConstraintHandler<EmptyStruct>(scip_constraint_handler_.get(),
                                            scip_);
     AddCallbackConstraint<EmptyStruct>(scip_, scip_constraint_handler_.get(),
@@ -859,27 +870,22 @@ void SCIPInterface::SetSolution(SCIP_SOL* solution) {
   }
 }
 
-absl::optional<MPSolutionResponse> SCIPInterface::DirectlySolveProto(
-    const MPModelRequest& request, std::atomic<bool>* interrupt) {
+bool SCIPInterface::SupportsDirectlySolveProto(
+    std::atomic<bool>* interrupt) const {
   // ScipSolveProto doesn't solve concurrently.
-  if (solver_->GetNumThreads() > 1) return absl::nullopt;
+  if (solver_->GetNumThreads() > 1) return false;
 
   // Interruption via atomic<bool> is not directly supported by SCIP.
-  if (interrupt != nullptr) return absl::nullopt;
+  if (interrupt != nullptr) return false;
 
-  const auto status_or = ScipSolveProto(request);
-  if (status_or.ok()) return status_or.value();
-  // Special case: if something is not implemented yet, fall back to solving
-  // through MPSolver.
-  if (absl::IsUnimplemented(status_or.status())) return absl::nullopt;
+  return true;
+}
 
-  if (request.enable_internal_solver_output()) {
-    LOG(INFO) << "Invalid SCIP status: " << status_or.status();
-  }
-  MPSolutionResponse response;
-  response.set_status(MPSOLVER_NOT_SOLVED);
-  response.set_status_str(status_or.status().ToString());
-  return response;
+MPSolutionResponse SCIPInterface::DirectlySolveProto(
+    LazyMutableCopy<MPModelRequest> request, std::atomic<bool>* interrupt) {
+  const bool log_error = request->enable_internal_solver_output();
+  return ConvertStatusOrMPSolutionResponse(log_error,
+                                           ScipSolveProto(std::move(request)));
 }
 
 int SCIPInterface::SolutionCount() { return SCIPgetNSols(scip_); }
@@ -1115,13 +1121,7 @@ class ScipMPCallbackContext : public MPCallbackContext {
 
 ScipConstraintHandlerForMPCallback::ScipConstraintHandlerForMPCallback(
     MPCallback* mp_callback)
-    : ScipConstraintHandler<EmptyStruct>(
-          // MOE(begin-strip):
-          {/*name=*/"mp_solver_constraint_handler",
-           /*description=*/
-           "A single constraint handler for all MPSolver models."}
-          // MOE(end-strip-and-replace): ScipConstraintHandlerDescription()
-          ),
+    : ScipConstraintHandler<EmptyStruct>(ScipConstraintHandlerDescription()),
       mp_callback_(mp_callback) {}
 
 std::vector<CallbackRangeConstraint>

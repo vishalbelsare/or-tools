@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -16,22 +16,27 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "absl/container/flat_hash_set.h"
+#include "absl/flags/flag.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/ascii.h"
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
-#include "ortools/base/commandlineflags.h"
-#include "ortools/base/integral_types.h"
+#include "absl/strings/string_view.h"
+#include "ortools/base/helpers.h"
 #include "ortools/base/logging.h"
-#include "ortools/base/map_util.h"
+#include "ortools/base/options.h"
+#include "ortools/base/status_macros.h"
 #include "ortools/linear_solver/linear_solver.pb.h"
-#include "ortools/util/fp_utils.h"
 
-ABSL_FLAG(bool, lp_log_invalid_name, false, "DEPRECATED.");
+ABSL_RETIRED_FLAG(bool, lp_log_invalid_name, false, "DEPRECATED.");
 
 namespace operations_research {
 namespace {
@@ -47,12 +52,12 @@ class LineBreaker {
   // - Lines are split so that their length doesn't exceed the max length;
   //   unless a single string given to Append() exceeds that length (in which
   //   case it will be put alone on a single unsplit line).
-  void Append(const std::string& s);
+  void Append(absl::string_view s);
 
   // Returns true if string s will fit on the current line without adding a
   // carriage return.
   bool WillFit(const std::string& s) {
-    return line_size_ + s.size() < max_line_size_;
+    return line_size_ + static_cast<int>(s.size()) < max_line_size_;
   }
 
   // "Consumes" size characters on the line. Used when starting the constraint
@@ -67,7 +72,7 @@ class LineBreaker {
   std::string output_;
 };
 
-void LineBreaker::Append(const std::string& s) {
+void LineBreaker::Append(absl::string_view s) {
   line_size_ += s.size();
   if (line_size_ > max_line_size_) {
     line_size_ = s.size();
@@ -79,6 +84,11 @@ void LineBreaker::Append(const std::string& s) {
 class MPModelProtoExporter {
  public:
   explicit MPModelProtoExporter(const MPModelProto& model);
+
+  // This type is neither copyable nor movable.
+  MPModelProtoExporter(const MPModelProtoExporter&) = delete;
+  MPModelProtoExporter& operator=(const MPModelProtoExporter&) = delete;
+
   bool ExportModelAsLpFormat(const MPModelExportOptions& options,
                              std::string* output);
   bool ExportModelAsMpsFormat(const MPModelExportOptions& options,
@@ -110,7 +120,7 @@ class MPModelProtoExporter {
   // Therefore, a name "$20<=40" for proto #3 could be "_$20__40_1".
   template <class ListOfProtosWithNameFields>
   std::vector<std::string> ExtractAndProcessNames(
-      const ListOfProtosWithNameFields& proto, const std::string& prefix,
+      const ListOfProtosWithNameFields& proto, absl::string_view prefix,
       bool obfuscate, bool log_invalid_names,
       const std::string& forbidden_first_chars,
       const std::string& forbidden_chars);
@@ -204,8 +214,6 @@ class MPModelProtoExporter {
   // Format for MPS file lines.
   std::unique_ptr<absl::ParsedFormat<'s', 's'>> mps_header_format_;
   std::unique_ptr<absl::ParsedFormat<'s', 's'>> mps_format_;
-
-  DISALLOW_COPY_AND_ASSIGN(MPModelProtoExporter);
 };
 
 }  // namespace
@@ -240,6 +248,14 @@ absl::StatusOr<std::string> ExportModelAsMpsFormat(
   return output;
 }
 
+absl::Status WriteModelToMpsFile(absl::string_view filename,
+                                 const MPModelProto& model,
+                                 const MPModelExportOptions& options) {
+  ASSIGN_OR_RETURN(std::string mps_data,
+                   ExportModelAsMpsFormat(model, options));
+  return file::SetContents(filename, mps_data, file::Defaults());
+}
+
 namespace {
 MPModelProtoExporter::MPModelProtoExporter(const MPModelProto& model)
     : proto_(model),
@@ -252,15 +268,15 @@ namespace {
 class NameManager {
  public:
   NameManager() : names_set_(), last_n_(1) {}
-  std::string MakeUniqueName(const std::string& name);
+  std::string MakeUniqueName(absl::string_view name);
 
  private:
   absl::flat_hash_set<std::string> names_set_;
   int last_n_;
 };
 
-std::string NameManager::MakeUniqueName(const std::string& name) {
-  std::string result = name;
+std::string NameManager::MakeUniqueName(absl::string_view name) {
+  std::string result(name);
   // Find the 'n' so that "name_n" does not already exist.
   int n = last_n_;
   while (!names_set_.insert(result).second) {
@@ -298,7 +314,7 @@ std::string MakeExportableName(const std::string& name,
 
 template <class ListOfProtosWithNameFields>
 std::vector<std::string> MPModelProtoExporter::ExtractAndProcessNames(
-    const ListOfProtosWithNameFields& proto, const std::string& prefix,
+    const ListOfProtosWithNameFields& proto, absl::string_view prefix,
     bool obfuscate, bool log_invalid_names,
     const std::string& forbidden_first_chars,
     const std::string& forbidden_chars) {
@@ -446,7 +462,8 @@ bool IsBoolean(const MPVariableProto& var) {
 }
 
 void UpdateMaxSize(const std::string& new_string, int* size) {
-  if (new_string.size() > *size) *size = new_string.size();
+  const int new_size = new_string.size();
+  if (new_size > *size) *size = new_size;
 }
 
 void UpdateMaxSize(double new_number, int* size) {
@@ -455,10 +472,6 @@ void UpdateMaxSize(double new_number, int* size) {
 }  // namespace
 
 void MPModelProtoExporter::Setup() {
-  if (absl::GetFlag(FLAGS_lp_log_invalid_name)) {
-    LOG(WARNING) << "The \"lp_log_invalid_name\" flag is deprecated. Use "
-                    "MPModelProtoExportOptions instead.";
-  }
   num_binary_variables_ = 0;
   num_integer_variables_ = 0;
   for (const MPVariableProto& var : proto_.variable()) {
@@ -593,6 +606,7 @@ bool MPModelProtoExporter::ExportModelAsLpFormat(
     if (binary_var_index < 0 || binary_var_index >= proto_.variable_size()) {
       return false;
     }
+    show_variable[binary_var_index] = true;
     line_breaker.Append(absl::StrFormat(
         "%s = %d -> ", exported_variable_names_[binary_var_index],
         binary_var_value));
@@ -820,6 +834,12 @@ bool MPModelProtoExporter::ExportModelAsMpsFormat(
   // RHS (right-hand-side) section.
   current_mps_column_ = 0;
   std::string rhs_section;
+  // Follow Gurobi's MPS format for objective offsets.
+  // See https://www.gurobi.com/documentation/9.1/refman/mps_format.html
+  if (proto_.objective_offset() != 0) {
+    AppendMpsTermWithContext("RHS", "COST", -proto_.objective_offset(),
+                             &rhs_section);
+  }
   for (int cst_index = 0; cst_index < proto_.constraint_size(); ++cst_index) {
     const MPConstraintProto& ct_proto = proto_.constraint(cst_index);
     const double lb = ct_proto.lower_bound();

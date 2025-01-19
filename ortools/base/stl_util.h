@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdint>
 #include <deque>
 #include <forward_list>
 #include <functional>
@@ -32,7 +33,6 @@
 
 #include "absl/meta/type_traits.h"
 #include "absl/strings/internal/resize_uninitialized.h"
-#include "ortools/base/integral_types.h"
 #include "ortools/base/macros.h"
 
 namespace gtl {
@@ -418,7 +418,7 @@ class TemplatedElementDeleter : public BaseDeleter {
   STLContainer* container_ptr_;
 };
 
-// ElementDeleter is an RAII (go/raii) object that deletes the elements in the
+// ElementDeleter is an RAII object that deletes the elements in the
 // given container when it goes out of scope. This is similar to
 // std::unique_ptr<> except that a container's elements will be deleted rather
 // than the container itself.
@@ -464,7 +464,7 @@ class TemplatedValueDeleter : public BaseDeleter {
   STLContainer* container_ptr_;
 };
 
-// ValueDeleter is an RAII (go/raii) object that deletes the 'second' member in
+// ValueDeleter is an RAII object that deletes the 'second' member in
 // the given container of std::pair<>s when it goes out of scope.
 //
 // Example:
@@ -488,7 +488,7 @@ class ValueDeleter {
   BaseDeleter* deleter_;
 };
 
-// RAII (go/raii) object that deletes elements in the given container when it
+// RAII object that deletes elements in the given container when it
 // goes out of scope. Like ElementDeleter (above) except that this class is
 // templated and doesn't have a virtual destructor.
 //
@@ -503,7 +503,7 @@ class STLElementDeleter {
   STLContainer* container_ptr_;
 };
 
-// RAII (go/raii) object that deletes the values in the given container of
+// RAII object that deletes the values in the given container of
 // std::pair<>s when it goes out of scope. Like ValueDeleter (above) except that
 // this class is templated and doesn't have a virtual destructor.
 //
@@ -892,99 +892,6 @@ template <typename In1, typename In2>
 bool SortedContainersHaveIntersection(const In1& in1, const In2& in2) {
   return SortedContainersHaveIntersection(
       in1, in2, gtl::stl_util_internal::TransparentLess());
-}
-
-// An std::allocator<T> subclass that keeps count of the active bytes allocated
-// by this class of allocators. This allocator is thread compatible
-// (go/thread-compatible). This should only be used in situations where you can
-// ensure that only a single thread performs allocation and deallocation.
-//
-// Example:
-//   using MyAlloc = STLCountingAllocator<std::string>;
-//   int64_t bytes = 0;
-//   std::vector<std::string, MyAlloc> v(MyAlloc(&bytes));
-//   v.push_back("hi");
-//   LOG(INFO) << "Bytes allocated " << bytes;
-//
-template <typename T, typename Alloc = std::allocator<T>>
-class STLCountingAllocator : public Alloc {
- public:
-  using Base = Alloc;
-  using pointer = typename Alloc::pointer;
-  using size_type = typename Alloc::size_type;
-
-  STLCountingAllocator() : bytes_used_(nullptr) {}
-  explicit STLCountingAllocator(int64_t* b) : bytes_used_(b) {}
-
-  // Constructor used for rebinding
-  template <typename U, typename B>
-  STLCountingAllocator(const STLCountingAllocator<U, B>& x)
-      : Alloc(x), bytes_used_(x.bytes_used()) {}
-
-  pointer allocate(size_type n,
-                   std::allocator<void>::const_pointer hint = nullptr) {
-    assert(bytes_used_ != nullptr);
-    *bytes_used_ += n * sizeof(T);
-    return Alloc::allocate(n, hint);
-  }
-
-  void deallocate(pointer p, size_type n) {
-    Alloc::deallocate(p, n);
-    assert(bytes_used_ != nullptr);
-    *bytes_used_ -= n * sizeof(T);
-  }
-
-  // Rebind allows an std::allocator<T> to be used for a different type
-  template <typename U>
-  class rebind {
-    using OtherA = typename Alloc::template rebind<U>::other;
-
-   public:
-    using other = STLCountingAllocator<U, OtherA>;
-  };
-
-  int64_t* bytes_used() const { return bytes_used_; }
-
- private:
-  int64_t* bytes_used_;
-};
-
-template <typename A>
-class STLCountingAllocator<void, A> : public A {
- public:
-  STLCountingAllocator() : bytes_used_(nullptr) {}
-  explicit STLCountingAllocator(int64_t* b) : bytes_used_(b) {}
-
-  // Constructor used for rebinding
-  template <typename U, typename B>
-  STLCountingAllocator(const STLCountingAllocator<U, B>& x)
-      : A(x), bytes_used_(x.bytes_used()) {}
-
-  template <typename U>
-  class rebind {
-    using OtherA = typename A::template rebind<U>::other;
-
-   public:
-    using other = STLCountingAllocator<U, OtherA>;
-  };
-  int64_t* bytes_used() const { return bytes_used_; }
-
- private:
-  int64_t* bytes_used_;
-};
-
-template <typename T, typename A>
-bool operator==(const STLCountingAllocator<T, A>& a,
-                const STLCountingAllocator<T, A>& b) {
-  using Base = typename STLCountingAllocator<T, A>::Base;
-  return static_cast<const Base&>(a) == static_cast<const Base&>(b) &&
-         a.bytes_used() == b.bytes_used();
-}
-
-template <typename T, typename A>
-bool operator!=(const STLCountingAllocator<T, A>& a,
-                const STLCountingAllocator<T, A>& b) {
-  return !(a == b);
 }
 
 }  // namespace gtl

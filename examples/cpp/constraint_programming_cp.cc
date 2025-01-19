@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -13,6 +13,9 @@
 
 // Constraint programming example that shows how to use the API.
 
+#include <vector>
+
+#include "ortools/base/init_google.h"
 #include "ortools/base/logging.h"
 #include "ortools/constraint_solver/constraint_solver.h"
 
@@ -40,8 +43,7 @@ void RunConstraintProgrammingExample() {
 
   solver.NewSearch(db);
   while (solver.NextSolution()) {
-    LOG(INFO) << "Solution"
-              << ": x = " << x->Value() << "; y = " << y->Value()
+    LOG(INFO) << "Solution" << ": x = " << x->Value() << "; y = " << y->Value()
               << "; z = " << z->Value();
   }
   solver.EndSearch();
@@ -54,8 +56,8 @@ void RunConstraintProgrammingExample() {
 }  // namespace operations_research
 
 int main(int argc, char** argv) {
-  google::InitGoogleLogging(argv[0]);
-  absl::SetFlag(&FLAGS_logtostderr, 1);
+  absl::SetFlag(&FLAGS_stderrthreshold, 0);
+  InitGoogle(argv[0], &argc, &argv, true);
   operations_research::RunConstraintProgrammingExample();
   return EXIT_SUCCESS;
 }

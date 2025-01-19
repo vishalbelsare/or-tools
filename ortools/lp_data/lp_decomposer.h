@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -17,7 +17,9 @@
 #include <memory>
 #include <vector>
 
+#include "absl/base/thread_annotations.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/types/span.h"
 #include "ortools/lp_data/lp_data.h"
 #include "ortools/lp_data/lp_types.h"
 
@@ -51,6 +53,10 @@ class LPDecomposer {
  public:
   LPDecomposer();
 
+  // This type is neither copyable nor movable.
+  LPDecomposer(const LPDecomposer&) = delete;
+  LPDecomposer& operator=(const LPDecomposer&) = delete;
+
   // Decomposes the problem into independent problems.
   // Note that a pointer is kept (no copy) on the linear_problem, so the problem
   // should not change during the life of the LPDecomposer object.
@@ -71,7 +77,7 @@ class LPDecomposer {
 
   // Returns an assignment to the original problem based on the assignments
   // to the independent problems. Requires Decompose() to have been called.
-  DenseRow AggregateAssignments(const std::vector<DenseRow>& assignments) const
+  DenseRow AggregateAssignments(absl::Span<const DenseRow> assignments) const
       ABSL_LOCKS_EXCLUDED(mutex_);
 
   // Returns an assignment to the given subproblem based on the assignment to
@@ -84,8 +90,6 @@ class LPDecomposer {
   std::vector<std::vector<ColIndex>> clusters_;
 
   mutable absl::Mutex mutex_;
-
-  DISALLOW_COPY_AND_ASSIGN(LPDecomposer);
 };
 
 }  // namespace glop

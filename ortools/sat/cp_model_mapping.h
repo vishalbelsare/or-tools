@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -20,10 +20,11 @@
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
-#include "ortools/base/int_type.h"
-#include "ortools/base/integral_types.h"
+#include "absl/log/check.h"
+#include "absl/meta/type_traits.h"
 #include "ortools/base/logging.h"
 #include "ortools/base/strong_vector.h"
+#include "ortools/base/types.h"
 #include "ortools/sat/cp_model.pb.h"
 #include "ortools/sat/cp_model_utils.h"
 #include "ortools/sat/integer.h"
@@ -31,6 +32,7 @@
 #include "ortools/sat/linear_constraint.h"
 #include "ortools/sat/model.h"
 #include "ortools/sat/sat_base.h"
+#include "ortools/util/strong_integers.h"
 
 namespace operations_research {
 namespace sat {
@@ -56,6 +58,10 @@ struct ObjectiveDefinition {
 
   double ScaleIntegerObjective(IntegerValue value) const {
     return (ToDouble(value) + offset) * scaling_factor;
+  }
+
+  double ScaleObjective(double value) const {
+    return (value + offset) * scaling_factor;
   }
 };
 
@@ -91,7 +97,7 @@ class CpModelMapping {
   // TODO(user): We could "easily" create an intermediate variable for more
   // complex linear expression. We could also identify duplicate expressions to
   // not create two identical integer variable.
-  AffineExpression LoadAffineView(const LinearExpressionProto& exp) const {
+  AffineExpression Affine(const LinearExpressionProto& exp) const {
     CHECK_LE(exp.vars().size(), 1);
     if (exp.vars().empty()) {
       return AffineExpression(IntegerValue(exp.offset()));
@@ -110,6 +116,7 @@ class CpModelMapping {
   template <typename List>
   std::vector<IntegerVariable> Integers(const List& list) const {
     std::vector<IntegerVariable> result;
+    result.reserve(list.size());
     for (const auto i : list) result.push_back(Integer(i));
     return result;
   }
@@ -117,13 +124,23 @@ class CpModelMapping {
   template <typename ProtoIndices>
   std::vector<sat::Literal> Literals(const ProtoIndices& indices) const {
     std::vector<sat::Literal> result;
+    result.reserve(indices.size());
     for (const int i : indices) result.push_back(CpModelMapping::Literal(i));
+    return result;
+  }
+
+  template <typename List>
+  std::vector<AffineExpression> Affines(const List& list) const {
+    std::vector<AffineExpression> result;
+    result.reserve(list.size());
+    for (const auto& i : list) result.push_back(Affine(i));
     return result;
   }
 
   template <typename ProtoIndices>
   std::vector<IntervalVariable> Intervals(const ProtoIndices& indices) const {
     std::vector<IntervalVariable> result;
+    result.reserve(indices.size());
     for (const int i : indices) result.push_back(Interval(i));
     return result;
   }
@@ -186,18 +203,6 @@ class CpModelMapping {
     return result;
   }
 
-  // Returns a heuristic set of values that could be created for the given
-  // variable when the constraints will be loaded.
-  // Note that the pointer is not stable across calls.
-  // It returns nullptr if the set is empty.
-  const absl::flat_hash_set<int64_t>& PotentialEncodedValues(int var) {
-    const auto& it = variables_to_encoded_values_.find(var);
-    if (it != variables_to_encoded_values_.end()) {
-      return it->second;
-    }
-    return empty_set_;
-  }
-
   // Returns the number of variables in the loaded proto.
   int NumProtoVariables() const { return integers_.size(); }
 
@@ -215,17 +220,13 @@ class CpModelMapping {
   // Recover from a IntervalVariable/BooleanVariable its associated CpModelProto
   // index. The value of -1 is used to indicate that there is no correspondence
   // (i.e. this variable is only used internally).
-  absl::StrongVector<BooleanVariable, int> reverse_boolean_map_;
-  absl::StrongVector<IntegerVariable, int> reverse_integer_map_;
+  util_intops::StrongVector<BooleanVariable, int> reverse_boolean_map_;
+  util_intops::StrongVector<IntegerVariable, int> reverse_integer_map_;
 
   // Set of constraints to ignore because they were already dealt with by
   // ExtractEncoding().
   absl::flat_hash_set<const ConstraintProto*> already_loaded_ct_;
   absl::flat_hash_set<const ConstraintProto*> is_half_encoding_ct_;
-
-  absl::flat_hash_map<int, absl::flat_hash_set<int64_t>>
-      variables_to_encoded_values_;
-  const absl::flat_hash_set<int64_t> empty_set_;
 };
 
 }  // namespace sat

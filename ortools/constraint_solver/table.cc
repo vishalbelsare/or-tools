@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -22,12 +22,10 @@
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/log/check.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/str_join.h"
-#include "ortools/base/commandlineflags.h"
-#include "ortools/base/integral_types.h"
-#include "ortools/base/logging.h"
-#include "ortools/base/map_util.h"
+#include "absl/types/span.h"
 #include "ortools/constraint_solver/constraint_solver.h"
 #include "ortools/constraint_solver/constraint_solveri.h"
 #include "ortools/util/bitset.h"
@@ -292,7 +290,7 @@ class PositiveTableConstraint : public BasePositiveTableConstraint {
       IntVar* const var = vars_[var_index];
       to_remove_.clear();
       for (const int64_t value : InitAndGetValues(iterators_[var_index])) {
-        if (!gtl::ContainsKey(mask, value)) {
+        if (!mask.contains(value)) {
           to_remove_.push_back(value);
         }
       }
@@ -355,7 +353,7 @@ class PositiveTableConstraint : public BasePositiveTableConstraint {
   bool Supported(int var_index, int64_t value) {
     DCHECK_GE(var_index, 0);
     DCHECK_LT(var_index, arity_);
-    DCHECK(gtl::ContainsKey(masks_[var_index], value));
+    DCHECK(masks_[var_index].contains(value));
     const std::vector<uint64_t>& mask = masks_[var_index][value];
     int tmp = 0;
     return active_tuples_.Intersects(mask, &tmp);
@@ -1163,7 +1161,7 @@ class TransitionConstraint : public Constraint {
   TransitionConstraint(Solver* const s, const std::vector<IntVar*>& vars,
                        const IntTupleSet& transition_table,
                        int64_t initial_state,
-                       const std::vector<int>& final_states)
+                       absl::Span<const int> final_states)
       : Constraint(s),
         vars_(vars),
         transition_table_(transition_table),

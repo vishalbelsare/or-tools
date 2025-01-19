@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -19,11 +19,9 @@
 #include <vector>
 
 #include "absl/container/flat_hash_set.h"
-#include "ortools/base/int_type.h"
-#include "ortools/base/integral_types.h"
 #include "ortools/base/logging.h"
-#include "ortools/base/map_util.h"
 #include "ortools/base/strong_vector.h"
+#include "ortools/base/types.h"
 #include "ortools/sat/cp_model.pb.h"
 #include "ortools/sat/cp_model_mapping.h"
 #include "ortools/sat/cp_model_utils.h"
@@ -32,6 +30,7 @@
 #include "ortools/sat/linear_relaxation.h"
 #include "ortools/sat/model.h"
 #include "ortools/sat/sat_base.h"
+#include "ortools/util/strong_integers.h"
 
 namespace operations_research {
 namespace sat {
@@ -66,6 +65,11 @@ void LoadBooleanSymmetries(const CpModelProto& model_proto, Model* m);
 // as already loaded.
 void ExtractEncoding(const CpModelProto& model_proto, Model* m);
 
+// Extract element encodings from exactly_one constraints and
+//    lit => var == value constraints.
+// This function must be called after ExtractEncoding() has been called.
+void ExtractElementEncoding(const CpModelProto& model_proto, Model* m);
+
 // Process all affine relations of the form a*X + b*Y == cte. For each
 // literals associated to (X >= bound) or (X == value) associate it to its
 // corresponding relation on Y. Also do the other side.
@@ -74,16 +78,6 @@ void ExtractEncoding(const CpModelProto& model_proto, Model* m);
 // removed in the presolve.
 void PropagateEncodingFromEquivalenceRelations(const CpModelProto& model_proto,
                                                Model* m);
-
-// Inspects the model and use some heuristic to decide which variable, if any,
-// should be fully encoded. Note that some constraints like the element or table
-// constraints require some of their variables to be fully encoded.
-//
-// TODO(user): This function exists so that we fully encode first all the
-// variable that needs to be fully encoded so that at loading time we can adapt
-// the algorithm used. Howeve it needs to duplicate the logic that decide what
-// needs to be fully encoded. Try to come up with a more robust design.
-void MaybeFullyEncodeMoreVariables(const CpModelProto& model_proto, Model* m);
 
 // Inspect the search strategy stored in the model, and adds a full encoding to
 // variables appearing in a SELECT_MEDIAN_VALUE search strategy if the search
@@ -110,16 +104,24 @@ void LoadIntMaxConstraint(const ConstraintProto& ct, Model* m);
 void LoadNoOverlapConstraint(const ConstraintProto& ct, Model* m);
 void LoadNoOverlap2dConstraint(const ConstraintProto& ct, Model* m);
 void LoadCumulativeConstraint(const ConstraintProto& ct, Model* m);
-void LoadReservoirConstraint(const ConstraintProto& ct, Model* m);
-void LoadElementConstraintBounds(const ConstraintProto& ct, Model* m);
-void LoadElementConstraintAC(const ConstraintProto& ct, Model* m);
-void LoadElementConstraint(const ConstraintProto& ct, Model* m);
-void LoadTableConstraint(const ConstraintProto& ct, Model* m);
-void LoadAutomatonConstraint(const ConstraintProto& ct, Model* m);
 void LoadCircuitConstraint(const ConstraintProto& ct, Model* m);
+void LoadReservoirConstraint(const ConstraintProto& ct, Model* m);
 void LoadRoutesConstraint(const ConstraintProto& ct, Model* m);
 void LoadCircuitCoveringConstraint(const ConstraintProto& ct, Model* m);
-void LoadInverseConstraint(const ConstraintProto& ct, Model* m);
+
+// Part of LoadLinearConstraint() that we reuse to load the objective.
+//
+// We split large constraints into a square root number of parts.
+// This is to avoid a bad complexity while propagating them since our
+// algorithm is not in O(num_changes).
+//
+// TODO(user): Alternatively, we could use a O(num_changes) propagation (a
+// bit tricky to implement), or a decomposition into a tree with more than
+// one level. Both requires experimentations.
+void SplitAndLoadIntermediateConstraints(bool lb_required, bool ub_required,
+                                         std::vector<IntegerVariable>* vars,
+                                         std::vector<int64_t>* coeffs,
+                                         Model* m);
 
 }  // namespace sat
 }  // namespace operations_research

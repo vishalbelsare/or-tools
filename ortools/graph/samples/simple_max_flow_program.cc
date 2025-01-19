@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -15,14 +15,19 @@
 // From Taha 'Introduction to Operations Research', example 6.4-2."""
 // [START import]
 #include <cstdint>
+#include <vector>
 
 #include "ortools/graph/max_flow.h"
 // [END import]
 
 namespace operations_research {
-
 // MaxFlow simple interface example.
 void SimpleMaxFlowProgram() {
+  // [START solver]
+  // Instantiate a SimpleMaxFlow solver.
+  SimpleMaxFlow max_flow;
+  // [END solver]
+
   // [START data]
   // Define three parallel arrays: start_nodes, end_nodes, and the capacities
   // between each pair. For instance, the arc from node 0 to node 1 has a
@@ -33,9 +38,6 @@ void SimpleMaxFlowProgram() {
   // [END data]
 
   // [START constraints]
-  // Instantiate a SimpleMaxFlow solver.
-  SimpleMaxFlow max_flow;
-
   // Add each arc.
   for (int i = 0; i < start_nodes.size(); ++i) {
     max_flow.AddArcWithCapacity(start_nodes[i], end_nodes[i], capacities[i]);
@@ -44,11 +46,11 @@ void SimpleMaxFlowProgram() {
 
   // [START solve]
   // Find the maximum flow between node 0 and node 4.
-  int solve_status = max_flow.Solve(0, 4);
+  int status = max_flow.Solve(0, 4);
   // [END solve]
 
   // [START print_solution]
-  if (solve_status == MaxFlow::OPTIMAL) {
+  if (status == MaxFlow::OPTIMAL) {
     LOG(INFO) << "Max flow: " << max_flow.OptimalFlow();
     LOG(INFO) << "";
     LOG(INFO) << "  Arc    Flow / Capacity";
@@ -58,7 +60,7 @@ void SimpleMaxFlowProgram() {
     }
   } else {
     LOG(INFO) << "Solving the max flow problem failed. Solver status: "
-              << solve_status;
+              << status;
   }
   // [END print_solution]
 }

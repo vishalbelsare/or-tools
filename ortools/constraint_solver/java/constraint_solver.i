@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -17,6 +17,7 @@
 %include "exception.i"
 
 %include "ortools/base/base.i"
+%include "ortools/util/java/absl_string_view.i"
 %include "ortools/util/java/tuple_set.i"
 %include "ortools/util/java/vector.i"
 %include "ortools/util/java/proto.i"
@@ -127,9 +128,10 @@ PROTECT_FROM_FAILURE(Solver::Fail(), arg1);
 
 %{
 #include <setjmp.h>
+
 #include <vector>
 
-#include "ortools/base/integral_types.h"
+#include "ortools/base/types.h"
 #include "ortools/constraint_solver/constraint_solver.h"
 #include "ortools/constraint_solver/constraint_solveri.h"
 %}
@@ -718,12 +720,17 @@ import java.util.function.LongConsumer;
 // Used to wrap Closure (std::function<void()>)
 // see https://docs.oracle.com/javase/8/docs/api/java/lang/Runnable.html
 import java.lang.Runnable;
+
+// Used to keep alive java references to objects passed to the C++ layer.
+import java.util.HashSet;
 %}
+
 // note: SWIG does not support multiple %typemap(javacode) Type, so we have to
 // define all Solver tweak here (ed and not in the macro DEFINE_CALLBACK_*)
 %typemap(javacode) Solver %{
   /**
    * This exceptions signal that a failure has been raised in the C++ world.
+   * @author lperron@google.com (Laurent Perron)
    */
   public static class FailException extends Exception {
     public FailException() {
@@ -801,7 +808,66 @@ import java.lang.Runnable;
     }
     return array;
   }
+
+  // Ensure that the GC doesn't collect any DecisionBuilder set from Java
+  // as the underlying C++ class stores a shallow copy
+  private HashSet<DecisionBuilder> keepAliveDecisionBuilders;
+  public void keepAliveDecisionBuilder(DecisionBuilder db) {
+    if (keepAliveDecisionBuilders == null) {
+      keepAliveDecisionBuilders = new HashSet<DecisionBuilder>();
+    }
+    keepAliveDecisionBuilders.add(db);
+  }
+  public void keepAliveDecisionBuilder(DecisionBuilder[] dbs) {
+    for (DecisionBuilder db : dbs) {
+      keepAliveDecisionBuilder(db);
+    }
+  }
 %}
+
+// Do not keep a reference of the decision builder in the java instance as it
+// is not stored inside the c++ layer.
+%typemap (javacode) SearchMonitor %{
+  public void keepAliveDecisionBuilder(DecisionBuilder db) {}
+%}
+
+%typemap(javaimports) DefaultPhaseParameters %{
+// Used to keep alive java references to objects passed to the C++ layer.
+import java.util.HashSet;
+%}
+
+%typemap(javacode) DefaultPhaseParameters %{
+  // Ensure that the GC doesn't collect any DecisionBuilder set from Java
+  // as the underlying C++ class stores a shallow copy
+  private HashSet<DecisionBuilder> keepAliveDecisionBuilders;
+  public void keepAliveDecisionBuilder(DecisionBuilder db) {
+    if (keepAliveDecisionBuilders == null) {
+      keepAliveDecisionBuilders = new HashSet<DecisionBuilder>();
+    }
+    keepAliveDecisionBuilders.add(db);
+  }
+%}
+
+// Do not keep a reference of the decision builder in the java instance as it
+// is not stored inside the c++ layer.
+%typemap (javacode) SearchLimit  %{
+  public void keepAliveDecisionBuilder(DecisionBuilder db) {}
+%}
+
+// Do not keep a reference of the decision builder in the java instance as it
+// is not stored inside the c++ layer.
+%typemap (javacode) OptimizeVar %{
+  public void keepAliveDecisionBuilder(DecisionBuilder db) {}
+%}
+
+%typemap(javain,
+         post="      keepAliveDecisionBuilder($javainput);"
+         ) DecisionBuilder* "DecisionBuilder.getCPtr($javainput)"
+
+%typemap(javain,
+         post="      keepAliveDecisionBuilder($javainput);"
+         ) const std::vector<DecisionBuilder*>& dbs "$javainput"
+
 %ignore Solver::SearchLogParameters;
 %ignore Solver::ActiveSearch;
 %ignore Solver::SetSearchContext;
@@ -1337,44 +1403,12 @@ import java.util.function.Supplier;
 %rename (setStartRange) PropagationMonitor::SetStartRange;
 %rename (startProcessingIntegerVariable) PropagationMonitor::StartProcessingIntegerVariable;
 
-// IntVarLocalSearchHandler
-%unignore IntVarLocalSearchHandler;
-%rename (addToAssignment) IntVarLocalSearchHandler::AddToAssignment;
-%rename (onAddVars) IntVarLocalSearchHandler::OnAddVars;
-%rename (onRevertChanges) IntVarLocalSearchHandler::OnRevertChanges;
-%rename (valueFromAssignent) IntVarLocalSearchHandler::ValueFromAssignent;
-
-// SequenceVarLocalSearchHandler
-%unignore SequenceVarLocalSearchHandler;
-%rename (addToAssignment) SequenceVarLocalSearchHandler::AddToAssignment;
-%rename (onAddVars) SequenceVarLocalSearchHandler::OnAddVars;
-%rename (onRevertChanges) SequenceVarLocalSearchHandler::OnRevertChanges;
-%rename (valueFromAssignent) SequenceVarLocalSearchHandler::ValueFromAssignent;
-
 // LocalSearchOperator
 %feature("director") LocalSearchOperator;
 %unignore LocalSearchOperator;
 %rename (nextNeighbor) LocalSearchOperator::MakeNextNeighbor;
 %rename (reset) LocalSearchOperator::Reset;
 %rename (start) LocalSearchOperator::Start;
-
-// VarLocalSearchOperator<>
-%unignore VarLocalSearchOperator;
-%ignore VarLocalSearchOperator::Start;
-%ignore VarLocalSearchOperator::ApplyChanges;
-%ignore VarLocalSearchOperator::RevertChanges;
-%ignore VarLocalSearchOperator::SkipUnchanged;
-%rename (size) VarLocalSearchOperator::Size;
-%rename (value) VarLocalSearchOperator::Value;
-%rename (isIncremental) VarLocalSearchOperator::IsIncremental;
-%rename (onStart) VarLocalSearchOperator::OnStart;
-%rename (oldValue) VarLocalSearchOperator::OldValue;
-%rename (setValue) VarLocalSearchOperator::SetValue;
-%rename (var) VarLocalSearchOperator::Var;
-%rename (activated) VarLocalSearchOperator::Activated;
-%rename (activate) VarLocalSearchOperator::Activate;
-%rename (deactivate) VarLocalSearchOperator::Deactivate;
-%rename (addVars) VarLocalSearchOperator::AddVars;
 
 // IntVarLocalSearchOperator
 %feature("director") IntVarLocalSearchOperator;
@@ -1409,15 +1443,6 @@ import java.util.function.Supplier;
 %feature("director") ChangeValue;
 %unignore ChangeValue;
 %rename (modifyValue) ChangeValue::ModifyValue;
-
-// SequenceVarLocalSearchOperator
-%feature("director") SequenceVarLocalSearchOperator;
-%unignore SequenceVarLocalSearchOperator;
-%ignore SequenceVarLocalSearchOperator::OldSequence;
-%ignore SequenceVarLocalSearchOperator::Sequence;
-%ignore SequenceVarLocalSearchOperator::SetBackwardSequence;
-%ignore SequenceVarLocalSearchOperator::SetForwardSequence;
-%rename (start) SequenceVarLocalSearchOperator::Start;
 
 // PathOperator
 %feature("director") PathOperator;
@@ -1593,7 +1618,7 @@ PROTO2_RETURN(operations_research::RegularLimitParameters,
 namespace operations_research {
 
 // Globals
-// IMPORTANT(corentinl): Globals will be placed in main.java
+// IMPORTANT(user): Globals will be placed in main.java
 // i.e. use `import com.[...].constraintsolver.main`
 %ignore FillValues;
 %rename (areAllBooleans) AreAllBooleans;

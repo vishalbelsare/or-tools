@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -88,6 +88,7 @@
 // The class also defines a hash functor that allows the IntType to be used
 // as key to hashable containers such as hash_map and hash_set.
 //
+// We suggest using the IntTypeIndexedContainer wrapper around google3's
 // FixedArray and STL vector (see int-type-indexed-container.h) if an IntType is
 // intended to be used as an index into these containers.  These wrappers are
 // indexed in a type-safe manner using IntTypes to ensure type-safety.
@@ -151,6 +152,7 @@
 #include <ostream>  // NOLINT
 #include <type_traits>
 
+#include "absl/base/port.h"
 #include "absl/strings/string_view.h"
 #include "ortools/base/macros.h"
 
@@ -189,6 +191,7 @@ class IntType {
   }
 
   // Note that this may change from time to time without notice.
+  // See .
   struct Hasher {
     size_t operator()(const IntType& arg) const {
       return static_cast<size_t>(arg.value());
@@ -244,14 +247,14 @@ class IntType {
   // -- ASSIGNMENT OPERATORS ---------------------------------------------------
   // We support the following assignment operators: =, +=, -=, *=, /=, <<=, >>=
   // and %= for both ThisType and ValueType.
-#define INT_TYPE_ASSIGNMENT_OP(op)                   \
-  ThisType& operator op(const ThisType& arg_value) { \
-    value_ op arg_value.value();                     \
-    return *this;                                    \
-  }                                                  \
-  ThisType& operator op(ValueType arg_value) {       \
-    value_ op arg_value;                             \
-    return *this;                                    \
+#define INT_TYPE_ASSIGNMENT_OP(op)                    \
+  ThisType& operator op(const ThisType & arg_value) { \
+    value_ op arg_value.value();                      \
+    return *this;                                     \
+  }                                                   \
+  ThisType& operator op(ValueType arg_value) {        \
+    value_ op arg_value;                              \
+    return *this;                                     \
   }
   INT_TYPE_ASSIGNMENT_OP(+=);
   INT_TYPE_ASSIGNMENT_OP(-=);

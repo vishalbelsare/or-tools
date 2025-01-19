@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -15,7 +15,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <limits>
 #include <map>
+#include <ostream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -23,8 +26,8 @@
 #include "absl/container/inlined_vector.h"
 #include "absl/strings/str_format.h"
 #include "absl/types/span.h"
-#include "ortools/base/integral_types.h"
 #include "ortools/base/logging.h"
+#include "ortools/base/types.h"
 #include "ortools/util/saturated_arithmetic.h"
 
 namespace operations_research {
@@ -64,14 +67,19 @@ std::string IntervalsAsString(const Intervals& intervals) {
 // IntervalsAreSortedAndNonAdjacent() would return true.
 void UnionOfSortedIntervals(absl::InlinedVector<ClosedInterval, 1>* intervals) {
   DCHECK(std::is_sorted(intervals->begin(), intervals->end()));
-  int new_size = 0;
-  for (const ClosedInterval& i : *intervals) {
-    if (new_size > 0 && i.start <= CapAdd((*intervals)[new_size - 1].end, 1)) {
-      (*intervals)[new_size - 1].end =
-          std::max(i.end, (*intervals)[new_size - 1].end);
-    } else {
-      (*intervals)[new_size++] = i;
+  const int size = intervals->size();
+  if (size == 0) return;
+
+  int new_size = 1;
+  for (int i = 1; i < size; ++i) {
+    const ClosedInterval& current = (*intervals)[i];
+    const int64_t end = (*intervals)[new_size - 1].end;
+    if (end == std::numeric_limits<int64_t>::max() ||
+        current.start <= end + 1) {
+      (*intervals)[new_size - 1].end = std::max(current.end, end);
+      continue;
     }
+    (*intervals)[new_size++] = current;
   }
   intervals->resize(new_size);
 
@@ -143,6 +151,9 @@ Domain Domain::FromValues(std::vector<int64_t> values) {
       result.intervals_.push_back({v, v});
     } else {
       result.intervals_.back().end = v;
+    }
+    if (result.intervals_.back().end == std::numeric_limits<int64_t>::max()) {
+      break;
     }
   }
   return result;
@@ -228,6 +239,61 @@ int64_t Domain::SmallestValue() const {
   return result;
 }
 
+Domain Domain::PartAroundZero() const {
+  for (const ClosedInterval interval : intervals_) {
+    if (interval.start <= 0 && interval.end >= 0) {
+      return Domain(interval.start, interval.end);
+    }
+  }
+  return Domain();
+}
+
+// TODO(user): Use std::upper_bound() like in ValueAtOrBefore() ?
+int64_t Domain::ClosestValue(int64_t wanted) const {
+  DCHECK(!IsEmpty());
+  if (wanted <= intervals_[0].start) {
+    return intervals_[0].start;
+  }
+  int64_t best_point;
+  int64_t best_distance;
+  for (const ClosedInterval interval : intervals_) {
+    if (interval.start <= wanted && wanted <= interval.end) {
+      return wanted;
+    } else if (interval.start >= wanted) {
+      return CapSub(interval.start, wanted) <= best_distance ? interval.start
+                                                             : best_point;
+    } else {
+      best_point = interval.end;
+      best_distance = CapSub(wanted, interval.end);
+    }
+  }
+  return best_point;
+}
+
+int64_t Domain::ValueAtOrBefore(int64_t input) const {
+  // Because we only compare by start and there is no duplicate starts, this
+  // should be the next interval after the one that has a chance to contains
+  // value.
+  auto it = std::upper_bound(intervals_.begin(), intervals_.end(),
+                             ClosedInterval(input, input));
+  if (it == intervals_.begin()) return input;
+  --it;
+  return input <= it->end ? input : it->end;
+}
+
+int64_t Domain::ValueAtOrAfter(int64_t input) const {
+  // Because we only compare by start and there is no duplicate starts, this
+  // should be the next interval after the one that has a chance to contains
+  // value.
+  auto it = std::upper_bound(intervals_.begin(), intervals_.end(),
+                             ClosedInterval(input, input));
+  if (it == intervals_.end()) return input;
+  const int64_t candidate = it->start;
+  if (it == intervals_.begin()) return candidate;
+  --it;
+  return input <= it->end ? input : candidate;
+}
+
 int64_t Domain::FixedValue() const {
   DCHECK(IsFixed());
   return intervals_.front().start;
@@ -242,6 +308,21 @@ bool Domain::Contains(int64_t value) const {
   if (it == intervals_.begin()) return false;
   --it;
   return value <= it->end;
+}
+
+// TODO(user): Deal with overflow.
+int64_t Domain::Distance(int64_t value) const {
+  int64_t min_distance = std::numeric_limits<int64_t>::max();
+  for (const ClosedInterval interval : intervals_) {
+    if (value >= interval.start && value <= interval.end) return 0;
+    if (interval.start > value) {
+      min_distance = std::min(min_distance, interval.start - value);
+      break;
+    } else {
+      min_distance = value - interval.end;
+    }
+  }
+  return min_distance;
 }
 
 bool Domain::IsIncludedIn(const Domain& domain) const {
@@ -352,8 +433,16 @@ Domain Domain::AdditionWith(const Domain& domain) const {
   result.intervals_.reserve(a.size() * b.size());
   for (const ClosedInterval& i : a) {
     for (const ClosedInterval& j : b) {
-      result.intervals_.push_back(
-          {CapAdd(i.start, j.start), CapAdd(i.end, j.end)});
+      if (i.start > 0 && j.start > 0) {
+        if (AddOverflows(i.start, j.start)) continue;  // empty.
+        result.intervals_.push_back({i.start + j.start, CapAdd(i.end, j.end)});
+      } else if (i.end < 0 && j.end < 0) {
+        if (AddOverflows(i.end, j.end)) continue;  // empty.
+        result.intervals_.push_back({CapAdd(i.start, j.start), i.end + j.end});
+      } else {
+        result.intervals_.push_back(
+            {CapAdd(i.start, j.start), CapAdd(i.end, j.end)});
+      }
     }
   }
 
@@ -478,13 +567,38 @@ Domain Domain::InverseMultiplicationBy(const int64_t coeff) const {
   return result;
 }
 
+namespace {
+Domain ModuloHelper(int64_t min, int64_t max, const Domain& modulo) {
+  DCHECK_GT(min, 0);
+  DCHECK_GT(modulo.Min(), 0);
+  const int64_t max_mod = modulo.Max() - 1;
+
+  // The min/max are exact if the modulo is fixed. Note that we could return the
+  // exact domain with a potential hole but we currently don't.
+  if (modulo.Min() == modulo.Max()) {
+    const int64_t size = max - min;
+    const int64_t v1 = min % modulo.Max();
+    if (v1 + size > max_mod) return Domain(0, max_mod);
+    return Domain(v1, v1 + size);
+  }
+
+  // TODO(user): This is a superset.
+  return Domain(0, std::min(max, max_mod));
+}
+}  // namespace
+
 Domain Domain::PositiveModuloBySuperset(const Domain& modulo) const {
   if (IsEmpty()) return Domain();
   CHECK_GT(modulo.Min(), 0);
   const int64_t max_mod = modulo.Max() - 1;
-  const int64_t max = std::min(Max(), max_mod);
-  const int64_t min = Min() < 0 ? std::max(Min(), -max_mod) : 0;
-  return Domain(min, max);
+  if (Max() >= 0 && Min() <= 0) {
+    return Domain(std::max(Min(), -max_mod), std::min(Max(), max_mod));
+  }
+  if (Min() > 0) {
+    return ModuloHelper(Min(), Max(), modulo);
+  }
+  DCHECK_LT(Max(), 0);
+  return ModuloHelper(-Max(), -Min(), modulo).Negation();
 }
 
 Domain Domain::PositiveDivisionBySuperset(const Domain& divisor) const {
@@ -492,6 +606,32 @@ Domain Domain::PositiveDivisionBySuperset(const Domain& divisor) const {
   CHECK_GT(divisor.Min(), 0);
   return Domain(std::min(Min() / divisor.Max(), Min() / divisor.Min()),
                 std::max(Max() / divisor.Min(), Max() / divisor.Max()));
+}
+
+Domain Domain::SquareSuperset() const {
+  if (IsEmpty()) return Domain();
+  const Domain abs_domain =
+      IntersectionWith({0, std::numeric_limits<int64_t>::max()})
+          .UnionWith(Negation().IntersectionWith(
+              {0, std::numeric_limits<int64_t>::max()}));
+  if (abs_domain.Size() >= kDomainComplexityLimit) {
+    Domain result;
+    result.intervals_.reserve(abs_domain.NumIntervals());
+    for (const auto& interval : abs_domain) {
+      result.intervals_.push_back(
+          ClosedInterval(CapProd(interval.start, interval.start),
+                         CapProd(interval.end, interval.end)));
+    }
+    UnionOfSortedIntervals(&result.intervals_);
+    return result;
+  } else {
+    std::vector<int64_t> values;
+    values.reserve(abs_domain.Size());
+    for (const int64_t value : abs_domain.Values()) {
+      values.push_back(CapProd(value, value));
+    }
+    return Domain::FromValues(std::move(values));
+  }
 }
 
 // It is a bit difficult to see, but this code is doing the same thing as

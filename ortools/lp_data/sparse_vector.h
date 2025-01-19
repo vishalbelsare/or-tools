@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -31,13 +31,15 @@
 #define OR_TOOLS_LP_DATA_SPARSE_VECTOR_H_
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <string>
+#include <utility>
 
 #include "absl/strings/str_format.h"
-#include "ortools/base/integral_types.h"
 #include "ortools/base/logging.h"  // for CHECK*
+#include "ortools/base/types.h"
 #include "ortools/graph/iterators.h"
 #include "ortools/lp_data/lp_types.h"
 #include "ortools/lp_data/permutation.h"
@@ -381,8 +383,8 @@ class SparseVector {
   EntryIndex capacity_;
 
   // Pointers to the first elements of the index and coefficient arrays.
-  Index* index_;
-  Fractional* coefficient_;
+  Index* index_ = nullptr;
+  Fractional* coefficient_ = nullptr;
 
   // This is here to speed up the CheckNoDuplicates() methods and is mutable
   // so we can perform checks on const argument.
@@ -597,14 +599,19 @@ void SparseVector<IndexType, IteratorType>::PopulateFromSparseVector(
   // the next step anyway.
   Clear();
   Reserve(sparse_vector.capacity_);
-  // NOTE(user): Using a single memmove would be slightly faster, but it
-  // would not work correctly if this already had a greater capacity than
-  // sparse_vector, because the coefficient_ pointer would be positioned
-  // incorrectly.
-  std::memmove(index_, sparse_vector.index_,
-               sizeof(Index) * sparse_vector.num_entries_.value());
-  std::memmove(coefficient_, sparse_vector.coefficient_,
-               sizeof(Fractional) * sparse_vector.num_entries_.value());
+  // If there are no entries, then sparse_vector.index_ or .coefficient_
+  // may be nullptr or invalid, and accessing them in memmove is UB,
+  // even if the moved size is zero.
+  if (sparse_vector.num_entries_ > 0) {
+    // NOTE(user): Using a single memmove would be slightly faster, but it
+    // would not work correctly if this already had a greater capacity than
+    // sparse_vector, because the coefficient_ pointer would be positioned
+    // incorrectly.
+    std::memmove(index_, sparse_vector.index_,
+                 sizeof(Index) * sparse_vector.num_entries_.value());
+    std::memmove(coefficient_, sparse_vector.coefficient_,
+                 sizeof(Fractional) * sparse_vector.num_entries_.value());
+  }
   num_entries_ = sparse_vector.num_entries_;
   may_contain_duplicates_ = sparse_vector.may_contain_duplicates_;
 }
@@ -894,10 +901,13 @@ void SparseVector<IndexType, IteratorType>::AddMultipleToSparseVectorInternal(
       ++ia;
       ++ib;
     } else if (index_a < index_b) {
-      c.MutableIndex(ic) = index_a;
-      c.MutableCoefficient(ic) = multiplier * a.GetCoefficient(ia);
+      const Fractional new_value = multiplier * a.GetCoefficient(ia);
+      if (std::abs(new_value) > drop_tolerance) {
+        c.MutableIndex(ic) = index_a;
+        c.MutableCoefficient(ic) = new_value;
+        ++ic;
+      }
       ++ia;
-      ++ic;
     } else {  // index_b < index_a
       c.MutableIndex(ic) = b.GetIndex(ib);
       c.MutableCoefficient(ic) = b.GetCoefficient(ib);
@@ -906,10 +916,13 @@ void SparseVector<IndexType, IteratorType>::AddMultipleToSparseVectorInternal(
     }
   }
   while (ia < size_a) {
-    c.MutableIndex(ic) = a.GetIndex(ia);
-    c.MutableCoefficient(ic) = multiplier * a.GetCoefficient(ia);
+    const Fractional new_value = multiplier * a.GetCoefficient(ia);
+    if (std::abs(new_value) > drop_tolerance) {
+      c.MutableIndex(ic) = a.GetIndex(ia);
+      c.MutableCoefficient(ic) = new_value;
+      ++ic;
+    }
     ++ia;
-    ++ic;
   }
   while (ib < size_b) {
     c.MutableIndex(ic) = b.GetIndex(ib);
@@ -920,6 +933,7 @@ void SparseVector<IndexType, IteratorType>::AddMultipleToSparseVectorInternal(
   c.ResizeDown(ic);
   c.may_contain_duplicates_ = false;
   c.Swap(accumulator_vector);
+  DCHECK(accumulator_vector->IsCleanedUp());
 }
 
 template <typename IndexType, typename IteratorType>

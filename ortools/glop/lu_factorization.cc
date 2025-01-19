@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -13,8 +13,13 @@
 
 #include "ortools/glop/lu_factorization.h"
 
+#include <algorithm>
 #include <cstddef>
+#include <cstdlib>
+#include <vector>
 
+#include "absl/log/check.h"
+#include "absl/types/span.h"
 #include "ortools/lp_data/lp_types.h"
 #include "ortools/lp_data/lp_utils.h"
 
@@ -61,7 +66,12 @@ Status LuFactorization::ComputeFactorization(
     stats_.lu_fill_in.Add(GetFillInPercentage(matrix));
     stats_.basis_num_entries.Add(matrix.num_entries().value());
   });
-  DCHECK(CheckFactorization(matrix, Fractional(1e-6)));
+
+  // Note(user): This might fail on badly scaled matrices. I still prefer to
+  // keep it as a DCHECK() for tests though, but I only test it for small
+  // matrices.
+  DCHECK(matrix.num_rows() > 100 ||
+         CheckFactorization(matrix, Fractional(1e-6)));
   return Status::OK();
 }
 
@@ -123,15 +133,14 @@ namespace {
 // norm of the given column, otherwise do the same with a sparse version. In
 // both cases column is cleared.
 Fractional ComputeSquaredNormAndResetToZero(
-    const std::vector<RowIndex>& non_zeros, DenseColumn* column) {
+    const std::vector<RowIndex>& non_zeros, absl::Span<Fractional> column) {
   Fractional sum = 0.0;
   if (non_zeros.empty()) {
-    sum = SquaredNorm(*column);
-    column->clear();
+    sum = SquaredNormAndResetToZero(column);
   } else {
     for (const RowIndex row : non_zeros) {
-      sum += Square((*column)[row]);
-      (*column)[row] = 0.0;
+      sum += Square(column[row.value()]);
+      (column)[row.value()] = 0.0;
     }
   }
   return sum;
@@ -143,7 +152,8 @@ Fractional LuFactorization::RightSolveSquaredNorm(const ColumnView& a) const {
   if (is_identity_factorization_) return SquaredNorm(a);
 
   non_zero_rows_.clear();
-  dense_zero_scratchpad_.resize(lower_.num_rows(), 0.0);
+  const RowIndex num_rows = lower_.num_rows();
+  dense_zero_scratchpad_.resize(num_rows, 0.0);
   DCHECK(IsAllZero(dense_zero_scratchpad_));
 
   for (const SparseColumn::Entry e : a) {
@@ -165,8 +175,9 @@ Fractional LuFactorization::RightSolveSquaredNorm(const ColumnView& a) const {
     upper_.HyperSparseSolveWithReversedNonZeros(&dense_zero_scratchpad_,
                                                 &non_zero_rows_);
   }
-  return ComputeSquaredNormAndResetToZero(non_zero_rows_,
-                                          &dense_zero_scratchpad_);
+  return ComputeSquaredNormAndResetToZero(
+      non_zero_rows_,
+      absl::MakeSpan(dense_zero_scratchpad_.data(), num_rows.value()));
 }
 
 Fractional LuFactorization::DualEdgeSquaredNorm(RowIndex row) const {
@@ -176,7 +187,8 @@ Fractional LuFactorization::DualEdgeSquaredNorm(RowIndex row) const {
       col_perm_.empty() ? row : ColToRowIndex(col_perm_[RowToColIndex(row)]);
 
   non_zero_rows_.clear();
-  dense_zero_scratchpad_.resize(lower_.num_rows(), 0.0);
+  const RowIndex num_rows = lower_.num_rows();
+  dense_zero_scratchpad_.resize(num_rows, 0.0);
   DCHECK(IsAllZero(dense_zero_scratchpad_));
   dense_zero_scratchpad_[permuted_row] = 1.0;
   non_zero_rows_.push_back(permuted_row);
@@ -195,8 +207,9 @@ Fractional LuFactorization::DualEdgeSquaredNorm(RowIndex row) const {
     transpose_lower_.HyperSparseSolveWithReversedNonZeros(
         &dense_zero_scratchpad_, &non_zero_rows_);
   }
-  return ComputeSquaredNormAndResetToZero(non_zero_rows_,
-                                          &dense_zero_scratchpad_);
+  return ComputeSquaredNormAndResetToZero(
+      non_zero_rows_,
+      absl::MakeSpan(dense_zero_scratchpad_.data(), num_rows.value()));
 }
 
 namespace {
@@ -338,7 +351,7 @@ void LuFactorization::RightSolveUWithNonZeros(ScatteredColumn* x) const {
   // If non-zeros is non-empty, we use an hypersparse solve. Note that if
   // non_zeros starts to be too big, we clear it and thus switch back to a
   // normal sparse solve.
-  upper_.ComputeRowsToConsiderInSortedOrder(&x->non_zeros, 0.1, 0.2);
+  upper_.ComputeRowsToConsiderInSortedOrder(&x->non_zeros);
   x->non_zeros_are_sorted = true;
   if (x->non_zeros.empty()) {
     transpose_upper_.TransposeLowerSolve(&x->values);

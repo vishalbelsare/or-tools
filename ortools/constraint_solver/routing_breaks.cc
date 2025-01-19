@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -21,8 +21,9 @@
 #include <utility>
 #include <vector>
 
-#include "ortools/base/integral_types.h"
+#include "absl/types/span.h"
 #include "ortools/base/logging.h"
+#include "ortools/base/types.h"
 #include "ortools/constraint_solver/constraint_solver.h"
 #include "ortools/constraint_solver/constraint_solveri.h"
 #include "ortools/constraint_solver/routing.h"
@@ -360,7 +361,10 @@ bool DisjunctivePropagator::DistanceDuration(Tasks* tasks) {
     const int64_t route_start_time =
         CapAdd(tasks->end_max[route_start], max_distance);
     const int64_t route_end_time = tasks->start_min[route_end];
-    int index_break_by_smin = tasks->num_chain_tasks;
+    // NOTE: all smin events must be closed by a corresponding emax event,
+    // otherwise num_active_tasks is wrong (too high) and the reasoning misses
+    // some filtering.
+    int index_break_by_smin = index_break_by_emax;
     while (index_break_by_emax < num_tasks) {
       // Find next time point among start/end of covering intervals.
       int64_t current_time =
@@ -603,7 +607,7 @@ bool DisjunctivePropagator::ChainSpanMinDynamic(Tasks* tasks) {
   }
 }
 
-void AppendTasksFromPath(const std::vector<int64_t>& path,
+void AppendTasksFromPath(absl::Span<const int64_t> path,
                          const TravelBounds& travel_bounds,
                          const RoutingDimension& dimension,
                          DisjunctivePropagator::Tasks* tasks) {
@@ -770,7 +774,7 @@ void GlobalVehicleBreaksConstraint::FillPartialPathOfVehicle(int vehicle) {
 }
 
 void GlobalVehicleBreaksConstraint::FillPathTravels(
-    const std::vector<int64_t>& path) {
+    absl::Span<const int64_t> path) {
   const int num_travels = path.size() - 1;
   travel_bounds_.min_travels.resize(num_travels);
   travel_bounds_.max_travels.resize(num_travels);

@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -51,12 +51,16 @@ DEFINE_INDEX_TYPE_TYPEDEF(
 DEFINE_INDEX_TYPE_TYPEDEF(
     operations_research::RoutingVehicleClassIndex,
     operations_research::RoutingModel::VehicleClassIndex);
-
+DEFINE_INDEX_TYPE_TYPEDEF(
+    operations_research::RoutingResourceClassIndex,
+    operations_research::RoutingModel::ResourceClassIndex);
 
 %ignore operations_research::RoutingModel::RegisterStateDependentTransitCallback;
 %ignore operations_research::RoutingModel::StateDependentTransitCallback;
 %ignore operations_research::RoutingModel::MakeStateDependentTransit;
 %ignore operations_research::RoutingModel::AddDimensionDependentDimensionWithVehicleCapacity;
+%ignore operations_research::RoutingModel::AddResourceGroup;
+%ignore operations_research::RoutingModel::GetResourceGroups;
 
 PY_PROTO_TYPEMAP(ortools.constraint_solver.routing_parameters_pb2,
                  RoutingModelParameters,
@@ -80,7 +84,7 @@ PY_PROTO_TYPEMAP(ortools.constraint_solver.routing_parameters_pb2,
 %include "ortools/constraint_solver/routing_parameters.h"
 %unignoreall
 
-// %including a .proto.h is frowned upon (for good general reasons), so we
+// %including a .pb.h is frowned upon (for good general reasons), so we
 // have to duplicate the OptionalBoolean enum here to give it to python users.
 namespace operations_research {
 enum OptionalBoolean {
@@ -88,6 +92,22 @@ enum OptionalBoolean {
   BOOL_FALSE = 2,
   BOOL_TRUE = 3,
 };
+
+struct FirstSolutionStrategy {
+  enum Value {};
+};
+
+struct LocalSearchMetaheuristic {
+  enum Value {};
+};
+
+// SimpleBoundCosts
+%unignore BoundCost;
+
+%unignore SimpleBoundCosts;
+%unignore SimpleBoundCosts::bound_cost;
+%rename("size") SimpleBoundCosts::Size;
+
 }  // namespace operations_research
 
 // TODO(user): Use ignoreall/unignoreall for this one. A lot of work.

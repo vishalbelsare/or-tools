@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -20,17 +20,19 @@
 // of each items.
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include "absl/flags/flag.h"
-#include "absl/flags/parse.h"
-#include "absl/flags/usage.h"
 #include "ortools/base/commandlineflags.h"
+#include "ortools/base/init_google.h"
 #include "ortools/base/logging.h"
 #include "ortools/sat/cp_model.h"
 
 ABSL_FLAG(int, size, 16, "scaling factor of the model");
-ABSL_FLAG(std::string, params, "", "Sat parameters");
+ABSL_FLAG(std::string, params,
+          "num_workers:8,log_search_progress:true,max_time_in_seconds:10.0",
+          "Sat parameters");
 
 namespace operations_research {
 namespace sat {
@@ -80,10 +82,10 @@ void MultiKnapsackSat(int scaling, const std::string& params) {
   for (int b = 0; b < num_bins; ++b) {
     IntVar bin_weight = builder.NewIntVar({kWeightMin, kWeightMax});
     bin_weights.push_back(bin_weight);
-    builder.AddEquality(LinearExpr::BooleanScalProd(items_in_bins[b], weights),
+    builder.AddEquality(LinearExpr::WeightedSum(items_in_bins[b], weights),
                         bin_weight);
     builder.AddLinearConstraint(
-        LinearExpr::BooleanScalProd(items_in_bins[b], volumes),
+        LinearExpr::WeightedSum(items_in_bins[b], volumes),
         {kVolumeMin, kVolumeMax});
   }
 
@@ -93,8 +95,7 @@ void MultiKnapsackSat(int scaling, const std::string& params) {
     for (int b = 0; b < num_bins; ++b) {
       bin_contain_item[b] = items_in_bins[b][i];
     }
-    builder.AddEquality(LinearExpr::BooleanSum(bin_contain_item),
-                        selected_items[i]);
+    builder.AddEquality(LinearExpr::Sum(bin_contain_item), selected_items[i]);
   }
 
   // Maximize the sums of weights.
@@ -110,9 +111,8 @@ void MultiKnapsackSat(int scaling, const std::string& params) {
 }  // namespace operations_research
 
 int main(int argc, char** argv) {
-  absl::SetFlag(&FLAGS_logtostderr, true);
-  google::InitGoogleLogging(argv[0]);
-  absl::ParseCommandLine(argc, argv);
+  absl::SetFlag(&FLAGS_stderrthreshold, 0);
+  InitGoogle(argv[0], &argc, &argv, true);
   operations_research::sat::MultiKnapsackSat(absl::GetFlag(FLAGS_size),
                                              absl::GetFlag(FLAGS_params));
   return EXIT_SUCCESS;

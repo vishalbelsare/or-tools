@@ -39,7 +39,7 @@
 <scm>
   <connection>scm:git:git://github.com/google/or-tools.git</connection>
   <developerConnection>scm:git:ssh://github.com:google/or-tools.git</developerConnection>
-  <url>http://github.com/google/or-tools/tree/master</url>
+  <url>http://github.com/google/or-tools/tree/main</url>
   <tag>HEAD</tag>
 </scm>
 
@@ -88,14 +88,28 @@
     <scope>runtime</scope>
   </dependency>
   <dependency>
+    <groupId>@JAVA_PACKAGE@</groupId>
+    <artifactId>ortools-linux-aarch64</artifactId>
+    <version>@PROJECT_VERSION@</version>
+    <type>jar</type>
+    <scope>runtime</scope>
+  </dependency>
+  <dependency>
+    <groupId>@JAVA_PACKAGE@</groupId>
+    <artifactId>ortools-darwin-aarch64</artifactId>
+    <version>@PROJECT_VERSION@</version>
+    <type>jar</type>
+    <scope>runtime</scope>
+  </dependency>
+  <dependency>
     <groupId>net.java.dev.jna</groupId>
     <artifactId>jna-platform</artifactId>
-    <version>5.8.0</version>
+    <version>5.14.0</version>
   </dependency>
   <dependency>
     <groupId>com.google.protobuf</groupId>
     <artifactId>protobuf-java</artifactId>
-    <version>3.18.0</version>
+    <version>4.26.1</version>
   </dependency>
 </dependencies>
 
@@ -104,7 +118,7 @@
     <plugin>
       <groupId>org.apache.maven.plugins</groupId>
       <artifactId>maven-source-plugin</artifactId>
-      <version>3.2.0</version>
+      <version>3.3.1</version>
       <executions>
         <execution>
           <id>attach-sources</id>
@@ -117,7 +131,7 @@
     <plugin>
       <groupId>org.apache.maven.plugins</groupId>
       <artifactId>maven-javadoc-plugin</artifactId>
-      <version>3.2.0</version>
+      <version>3.8.0</version>
       <configuration>
         <detectJavaApiLink>false</detectJavaApiLink>
         <source>${maven.compiler.source}</source>
@@ -136,7 +150,7 @@
     <plugin>
       <groupId>org.apache.maven.plugins</groupId>
       <artifactId>maven-gpg-plugin</artifactId>
-      <version>1.6</version>
+      <version>3.2.5</version>
       <executions>
         <execution>
           <id>sign-artifacts</id>
@@ -154,4 +168,39 @@
     </plugin>
   </plugins>
 </build>
+
+<profiles>
+  <profile>
+    <id>build-fat-jar</id>
+    <activation>
+      <property>
+        <name>fatjar</name>
+        <value>true</value>
+      </property>
+    </activation>
+    <build>
+      <plugins>
+        <plugin>
+          <artifactId>maven-assembly-plugin</artifactId>
+          <configuration>
+            <descriptorRefs>
+              <descriptorRef>jar-with-dependencies</descriptorRef>
+            </descriptorRefs>
+            <appendAssemblyId>false</appendAssemblyId>
+          </configuration>
+          <executions>
+            <execution>
+              <id>make-assembly</id> <!-- this is used for inheritance merges -->
+              <phase>package</phase> <!-- bind to the packaging phase -->
+              <goals>
+                <goal>single</goal>
+              </goals>
+            </execution>
+          </executions>
+        </plugin>
+      </plugins>
+    </build>
+  </profile>
+</profiles>
+
 </project>

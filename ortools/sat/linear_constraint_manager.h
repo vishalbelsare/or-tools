@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -16,20 +16,37 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <vector>
 
+#include "absl/container/btree_map.h"
 #include "absl/container/flat_hash_map.h"
-#include "absl/container/flat_hash_set.h"
+#include "absl/strings/string_view.h"
 #include "ortools/base/strong_vector.h"
-#include "ortools/glop/revised_simplex.h"
+#include "ortools/glop/variables_info.h"
+#include "ortools/lp_data/lp_types.h"
+#include "ortools/sat/integer.h"
 #include "ortools/sat/linear_constraint.h"
 #include "ortools/sat/model.h"
 #include "ortools/sat/sat_parameters.pb.h"
+#include "ortools/sat/util.h"
 #include "ortools/util/logging.h"
+#include "ortools/util/strong_integers.h"
 #include "ortools/util/time_limit.h"
 
 namespace operations_research {
 namespace sat {
+
+// Stores for each IntegerVariable its temporary LP solution.
+//
+// This is shared between all LinearProgrammingConstraint because in the corner
+// case where we have many different LinearProgrammingConstraint and a lot of
+// variable, we could theoretically use up a quadratic amount of memory
+// otherwise.
+struct ModelLpValues
+    : public util_intops::StrongVector<IntegerVariable, double> {
+  ModelLpValues() = default;
+};
 
 // This class holds a list of globally valid linear constraints and has some
 // logic to decide which one should be part of the LP relaxation. We want more
@@ -43,19 +60,30 @@ namespace sat {
 class LinearConstraintManager {
  public:
   struct ConstraintInfo {
+    // Note that this constraint always contains "tight" lb/ub, some of these
+    // bound might be trivial level zero bounds, and one can know this by
+    // looking at lb_is_trivial/ub_is_trivial.
     LinearConstraint constraint;
+
     double l2_norm = 0.0;
-    int64_t inactive_count = 0;
     double objective_parallelism = 0.0;
-    bool objective_parallelism_computed = false;
-    bool is_in_lp = false;
     size_t hash;
-    double current_score = 0.0;
 
     // Updated only for deletable constraints. This is incremented every time
     // ChangeLp() is called and the constraint is active in the LP or not in the
     // LP and violated.
     double active_count = 0.0;
+
+    // TODO(user): This is the number of time the constraint was consecutively
+    // inactive, and go up to 100 with the default param, so we could optimize
+    // the space used more.
+    uint16_t inactive_count = 0;
+
+    // TODO(user): Pack bool and in general optimize the memory of this class.
+    bool objective_parallelism_computed = false;
+    bool is_in_lp = false;
+    bool ub_is_trivial = false;
+    bool lb_is_trivial = false;
 
     // For now, we mark all the generated cuts as deletable and the problem
     // constraints as undeletable.
@@ -69,15 +97,17 @@ class LinearConstraintManager {
       : sat_parameters_(*model->GetOrCreate<SatParameters>()),
         integer_trail_(*model->GetOrCreate<IntegerTrail>()),
         time_limit_(model->GetOrCreate<TimeLimit>()),
+        expanded_lp_solution_(*model->GetOrCreate<ModelLpValues>()),
         model_(model),
         logger_(model->GetOrCreate<SolverLogger>()) {}
+  ~LinearConstraintManager();
 
   // Add a new constraint to the manager. Note that we canonicalize constraints
   // and merge the bounds of constraints with the same terms. We also perform
   // basic preprocessing. If added is given, it will be set to true if this
   // constraint was actually a new one and to false if it was dominated by an
   // already existing one.
-  DEFINE_INT_TYPE(ConstraintIndex, int32_t);
+  DEFINE_STRONG_INDEX_TYPE(ConstraintIndex);
   ConstraintIndex Add(LinearConstraint ct, bool* added = nullptr);
 
   // Same as Add(), but logs some information about the newly added constraint.
@@ -86,8 +116,11 @@ class LinearConstraintManager {
   // Returns true if a new cut was added and false if this cut is not
   // efficacious or if it is a duplicate of an already existing one.
   bool AddCut(LinearConstraint ct, std::string type_name,
-              const absl::StrongVector<IntegerVariable, double>& lp_solution,
               std::string extra_info = "");
+
+  // These must be level zero bounds.
+  bool UpdateConstraintLb(glop::RowIndex index_in_lp, IntegerValue new_lb);
+  bool UpdateConstraintUb(glop::RowIndex index_in_lp, IntegerValue new_ub);
 
   // The objective is used as one of the criterion to score cuts.
   // The more a cut is parallel to the objective, the better its score is.
@@ -96,25 +129,25 @@ class LinearConstraintManager {
   // is easy to support dynamic modification if it becomes needed.
   void SetObjectiveCoefficient(IntegerVariable var, IntegerValue coeff);
 
-  // Heuristic to decides what LP is best solved next. The given lp_solution
-  // should usually be the optimal solution of the LP returned by GetLp() before
-  // this call, but is just used as an heuristic.
+  // Heuristic to decides what LP is best solved next. We use the model lp
+  // solutions as an heuristic, and it should usually be updated with the last
+  // known solution before this call.
   //
   // The current solution state is used for detecting inactive constraints. It
   // is also updated correctly on constraint deletion/addition so that the
   // simplex can be fully iterative on restart by loading this modified state.
   //
   // Returns true iff LpConstraints() will return a different LP than before.
-  bool ChangeLp(const absl::StrongVector<IntegerVariable, double>& lp_solution,
-                glop::BasisState* solution_state);
+  bool ChangeLp(glop::BasisState* solution_state,
+                int* num_new_constraints = nullptr);
 
   // This can be called initially to add all the current constraint to the LP
   // returned by GetLp().
   void AddAllConstraintsToLp();
 
   // All the constraints managed by this class.
-  const absl::StrongVector<ConstraintIndex, ConstraintInfo>& AllConstraints()
-      const {
+  const util_intops::StrongVector<ConstraintIndex, ConstraintInfo>&
+  AllConstraints() const {
     return constraint_infos_;
   }
 
@@ -124,26 +157,39 @@ class LinearConstraintManager {
     return lp_constraints_;
   }
 
-  int64_t num_cuts() const { return num_cuts_; }
+  // To simplify CutGenerator api.
+  const util_intops::StrongVector<IntegerVariable, double>& LpValues() {
+    return expanded_lp_solution_;
+  }
+
+  // Stats.
+  int64_t num_constraints() const { return constraint_infos_.size(); }
+  int64_t num_constraint_updates() const { return num_constraint_updates_; }
+  int64_t num_simplifications() const { return num_simplifications_; }
+  int64_t num_merged_constraints() const { return num_merged_constraints_; }
   int64_t num_shortened_constraints() const {
     return num_shortened_constraints_;
   }
+  int64_t num_split_constraints() const { return num_split_constraints_; }
   int64_t num_coeff_strenghtening() const { return num_coeff_strenghtening_; }
+  int64_t num_cuts() const { return num_cuts_; }
+  int64_t num_add_cut_calls() const { return num_add_cut_calls_; }
 
-  // If a debug solution has been loaded, this checks if the given constaint cut
-  // it or not. Returns true iff everything is fine and the cut does not violate
-  // the loaded solution.
+  const absl::btree_map<std::string, int>& type_to_num_cuts() const {
+    return type_to_num_cuts_;
+  }
+
+  // If a debug solution has been loaded, this checks if the given constraint
+  // cut it or not. Returns true if and only if everything is fine and the cut
+  // does not violate the loaded solution.
   bool DebugCheckConstraint(const LinearConstraint& cut);
-
-  // Returns statistics on the cut added.
-  std::string Statistics() const;
 
  private:
   // Heuristic that decide which constraints we should remove from the current
   // LP. Note that such constraints can be added back later by the heuristic
   // responsible for adding new constraints from the pool.
   //
-  // Returns true iff one or more constraints where removed.
+  // Returns true if and only if one or more constraints where removed.
   //
   // If the solutions_state is empty, then this function does nothing and
   // returns false (this is used for tests). Otherwise, the solutions_state is
@@ -159,7 +205,7 @@ class LinearConstraintManager {
 
   // Helper method to compute objective parallelism for a given constraint. This
   // also lazily computes objective norm.
-  void ComputeObjectiveParallelism(const ConstraintIndex ct_index);
+  void ComputeObjectiveParallelism(ConstraintIndex ct_index);
 
   // Multiplies all active counts and the increment counter by the given
   // 'scaling_factor'. This should be called when at least one of the active
@@ -170,6 +216,9 @@ class LinearConstraintManager {
   // don't remove any constraints which are already in LP.
   void PermanentlyRemoveSomeConstraints();
 
+  // Make sure the lb/ub are tight and fill lb_is_trivial/ub_is_trivial.
+  void FillDerivedFields(ConstraintInfo* info);
+
   const SatParameters& sat_parameters_;
   const IntegerTrail& integer_trail_;
 
@@ -179,7 +228,7 @@ class LinearConstraintManager {
   // Optimization to avoid calling SimplifyConstraint() when not needed.
   int64_t last_simplification_timestamp_ = 0;
 
-  absl::StrongVector<ConstraintIndex, ConstraintInfo> constraint_infos_;
+  util_intops::StrongVector<ConstraintIndex, ConstraintInfo> constraint_infos_;
 
   // The subset of constraints currently in the lp.
   std::vector<ConstraintIndex> lp_constraints_;
@@ -191,15 +240,16 @@ class LinearConstraintManager {
   // constraints.
   absl::flat_hash_map<size_t, ConstraintIndex> equiv_constraints_;
 
+  int64_t num_constraint_updates_ = 0;
   int64_t num_simplifications_ = 0;
   int64_t num_merged_constraints_ = 0;
   int64_t num_shortened_constraints_ = 0;
-  int64_t num_splitted_constraints_ = 0;
+  int64_t num_split_constraints_ = 0;
   int64_t num_coeff_strenghtening_ = 0;
 
   int64_t num_cuts_ = 0;
   int64_t num_add_cut_calls_ = 0;
-  std::map<std::string, int> type_to_num_cuts_;
+  absl::btree_map<std::string, int> type_to_num_cuts_;
 
   bool objective_is_defined_ = false;
   bool objective_norm_computed_ = false;
@@ -210,12 +260,13 @@ class LinearConstraintManager {
 
   // Sparse representation of the objective coeffs indexed by positive variables
   // indices. Important: We cannot use a dense representation here in the corner
-  // case where we have many indepedent LPs. Alternatively, we could share a
+  // case where we have many independent LPs. Alternatively, we could share a
   // dense vector between all LinearConstraintManager.
   double sum_of_squared_objective_coeffs_ = 0.0;
   absl::flat_hash_map<IntegerVariable, double> objective_map_;
 
   TimeLimit* time_limit_;
+  ModelLpValues& expanded_lp_solution_;
   Model* model_;
   SolverLogger* logger_;
 
@@ -231,59 +282,6 @@ class LinearConstraintManager {
   int32_t num_deletable_constraints_ = 0;
 };
 
-// Keep the top n elements from a stream of elements.
-//
-// TODO(user): We could use gtl::TopN when/if it gets open sourced. Note that
-// we might be slighlty faster here since we use an indirection and don't move
-// the Element class around as much.
-template <typename Element>
-class TopN {
- public:
-  explicit TopN(int n) : n_(n) {}
-
-  void Clear() {
-    heap_.clear();
-    elements_.clear();
-  }
-
-  void Add(Element e, double score) {
-    if (heap_.size() < n_) {
-      const int index = elements_.size();
-      heap_.push_back({index, score});
-      elements_.push_back(std::move(e));
-      if (heap_.size() == n_) {
-        // TODO(user): We could delay that on the n + 1 push.
-        std::make_heap(heap_.begin(), heap_.end());
-      }
-    } else {
-      if (score <= heap_.front().score) return;
-      const int index_to_replace = heap_.front().index;
-      elements_[index_to_replace] = std::move(e);
-
-      // If needed, we could be faster here with an update operation.
-      std::pop_heap(heap_.begin(), heap_.end());
-      heap_.back() = {index_to_replace, score};
-      std::push_heap(heap_.begin(), heap_.end());
-    }
-  }
-
-  const std::vector<Element>& UnorderedElements() const { return elements_; }
-
- private:
-  const int n_;
-
-  // We keep a heap of the n lowest score.
-  struct HeapElement {
-    int index;  // in elements_;
-    double score;
-    const double operator<(const HeapElement& other) const {
-      return score > other.score;
-    }
-  };
-  std::vector<HeapElement> heap_;
-  std::vector<Element> elements_;
-};
-
 // Before adding cuts to the global pool, it is a classical thing to only keep
 // the top n of a given type during one generation round. This is there to help
 // doing that.
@@ -295,21 +293,20 @@ class TopNCuts {
  public:
   explicit TopNCuts(int n) : cuts_(n) {}
 
-  // Add a cut to the local pool
-  void AddCut(LinearConstraint ct, const std::string& name,
-              const absl::StrongVector<IntegerVariable, double>& lp_solution);
+  // Adds a cut to the local pool.
+  void AddCut(
+      LinearConstraint ct, absl::string_view name,
+      const util_intops::StrongVector<IntegerVariable, double>& lp_solution);
 
   // Empty the local pool and add all its content to the manager.
-  void TransferToManager(
-      const absl::StrongVector<IntegerVariable, double>& lp_solution,
-      LinearConstraintManager* manager);
+  void TransferToManager(LinearConstraintManager* manager);
 
  private:
   struct CutCandidate {
     std::string name;
     LinearConstraint cut;
   };
-  TopN<CutCandidate> cuts_;
+  TopN<CutCandidate, double> cuts_;
 };
 
 }  // namespace sat

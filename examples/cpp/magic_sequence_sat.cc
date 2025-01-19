@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -18,13 +18,15 @@
 
 #include <cstdint>
 #include <cstdlib>
+#include <numeric>
+#include <string>
+#include <vector>
 
 #include "absl/flags/flag.h"
-#include "absl/flags/parse.h"
-#include "absl/flags/usage.h"
 #include "absl/strings/str_format.h"
-#include "ortools/base/integral_types.h"
+#include "ortools/base/init_google.h"
 #include "ortools/base/logging.h"
+#include "ortools/base/types.h"
 #include "ortools/sat/cp_model.h"
 
 ABSL_FLAG(int, size, 50, "Size of the problem.");
@@ -47,7 +49,7 @@ void MagicSequence(int size) {
 
   // Domain constraint on each position.
   for (int i = 0; i < size; ++i) {
-    cp_model.AddEquality(LinearExpr::BooleanSum(var_domains[i]), 1);
+    cp_model.AddEquality(LinearExpr::Sum(var_domains[i]), 1);
   }
 
   // The number of variables equal to j shall be the value of vars[j].
@@ -60,8 +62,8 @@ void MagicSequence(int size) {
     for (int i = 0; i < size; ++i) {
       vars_equal_to_j.push_back(var_domains[i][j]);
     }
-    cp_model.AddEquality(LinearExpr::BooleanScalProd(var_domains[j], values),
-                         LinearExpr::BooleanSum(vars_equal_to_j));
+    cp_model.AddEquality(LinearExpr::WeightedSum(var_domains[j], values),
+                         LinearExpr::Sum(vars_equal_to_j));
   }
 
   const CpSolverResponse response =
@@ -90,9 +92,8 @@ void MagicSequence(int size) {
 }  // namespace operations_research
 
 int main(int argc, char** argv) {
-  absl::SetFlag(&FLAGS_logtostderr, true);
-  google::InitGoogleLogging(argv[0]);
-  absl::ParseCommandLine(argc, argv);
+  absl::SetFlag(&FLAGS_stderrthreshold, 0);
+  InitGoogle(argv[0], &argc, &argv, true);
 
   operations_research::sat::MagicSequence(absl::GetFlag(FLAGS_size));
   return EXIT_SUCCESS;

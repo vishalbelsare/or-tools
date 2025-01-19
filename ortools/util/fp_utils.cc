@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -18,14 +18,16 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstdlib>
 #include <limits>
 #include <utility>
 #include <vector>
 
 #include "absl/base/casts.h"
 #include "absl/base/internal/endian.h"
-#include "ortools/base/integral_types.h"
-#include "ortools/base/logging.h"
+#include "absl/log/check.h"
+#include "absl/types/span.h"
 #include "ortools/util/bitset.h"
 
 namespace operations_research {
@@ -39,9 +41,9 @@ void ReorderAndCapTerms(double* min, double* max) {
 }
 
 template <bool use_bounds>
-void ComputeScalingErrors(const std::vector<double>& input,
-                          const std::vector<double>& lb,
-                          const std::vector<double>& ub, double scaling_factor,
+void ComputeScalingErrors(absl::Span<const double> input,
+                          absl::Span<const double> lb,
+                          absl::Span<const double> ub, double scaling_factor,
                           double* max_relative_coeff_error,
                           double* max_scaled_sum_error) {
   double max_error = 0.0;
@@ -70,9 +72,9 @@ void ComputeScalingErrors(const std::vector<double>& input,
 }
 
 template <bool use_bounds>
-void GetBestScalingOfDoublesToInt64(const std::vector<double>& input,
-                                    const std::vector<double>& lb,
-                                    const std::vector<double>& ub,
+void GetBestScalingOfDoublesToInt64(absl::Span<const double> input,
+                                    absl::Span<const double> lb,
+                                    absl::Span<const double> ub,
                                     int64_t max_absolute_sum,
                                     double* scaling_factor) {
   const double kInfinity = std::numeric_limits<double>::infinity();
@@ -113,6 +115,9 @@ void GetBestScalingOfDoublesToInt64(const std::vector<double>& input,
     // round(fabs(c).2^candidate) <= max_absolute_sum.
     const double c = std::max(-min_term, max_term);
     int candidate = msb - ilogb(c);
+    if (candidate >= std::numeric_limits<double>::max_exponent) {
+      candidate = std::numeric_limits<double>::max_exponent - 1;
+    }
     if (std::round(ldexp(std::abs(c), candidate)) > max_absolute_sum) {
       --candidate;
     }
@@ -130,7 +135,8 @@ void GetBestScalingOfDoublesToInt64(const std::vector<double>& input,
           static_cast<int64_t>(std::round(ldexp(min_term, factor_exponent)));
       sum_max +=
           static_cast<int64_t>(std::round(ldexp(max_term, factor_exponent)));
-      if (sum_min > max_absolute_sum || sum_max > max_absolute_sum) {
+      if (sum_min > static_cast<uint64_t>(max_absolute_sum) ||
+          sum_max > static_cast<uint64_t>(max_absolute_sum)) {
         factor_exponent--;
         recompute_sum = true;
       }
@@ -155,7 +161,8 @@ void GetBestScalingOfDoublesToInt64(const std::vector<double>& input,
         sum_max +=
             static_cast<int64_t>(std::round(ldexp(max_term, factor_exponent)));
       }
-      if (sum_min > max_absolute_sum || sum_max > max_absolute_sum) {
+      if (sum_min > static_cast<uint64_t>(max_absolute_sum) ||
+          sum_max > static_cast<uint64_t>(max_absolute_sum)) {
         factor_exponent--;
       } else {
         recompute_sum = false;
@@ -167,26 +174,27 @@ void GetBestScalingOfDoublesToInt64(const std::vector<double>& input,
 
 }  // namespace
 
-void ComputeScalingErrors(const std::vector<double>& input,
-                          const std::vector<double>& lb,
-                          const std::vector<double>& ub, double scaling_factor,
+void ComputeScalingErrors(absl::Span<const double> input,
+                          absl::Span<const double> lb,
+                          absl::Span<const double> ub, double scaling_factor,
                           double* max_relative_coeff_error,
                           double* max_scaled_sum_error) {
   ComputeScalingErrors<true>(input, lb, ub, scaling_factor,
                              max_relative_coeff_error, max_scaled_sum_error);
 }
 
-double GetBestScalingOfDoublesToInt64(const std::vector<double>& input,
-                                      const std::vector<double>& lb,
-                                      const std::vector<double>& ub,
+double GetBestScalingOfDoublesToInt64(absl::Span<const double> input,
+                                      absl::Span<const double> lb,
+                                      absl::Span<const double> ub,
                                       int64_t max_absolute_sum) {
   double scaling_factor;
   GetBestScalingOfDoublesToInt64<true>(input, lb, ub, max_absolute_sum,
                                        &scaling_factor);
+  DCHECK(std::isfinite(scaling_factor));
   return scaling_factor;
 }
 
-void GetBestScalingOfDoublesToInt64(const std::vector<double>& input,
+void GetBestScalingOfDoublesToInt64(absl::Span<const double> input,
                                     int64_t max_absolute_sum,
                                     double* scaling_factor,
                                     double* max_relative_coeff_error) {
@@ -195,12 +203,15 @@ void GetBestScalingOfDoublesToInt64(const std::vector<double>& input,
                                         scaling_factor);
   ComputeScalingErrors<false>(input, {}, {}, *scaling_factor,
                               max_relative_coeff_error, &max_scaled_sum_error);
+  DCHECK(std::isfinite(*scaling_factor));
 }
 
-int64_t ComputeGcdOfRoundedDoubles(const std::vector<double>& x,
+int64_t ComputeGcdOfRoundedDoubles(absl::Span<const double> x,
                                    double scaling_factor) {
+  DCHECK(std::isfinite(scaling_factor));
   int64_t gcd = 0;
-  for (int i = 0; i < x.size() && gcd != 1; ++i) {
+  const int size = static_cast<int>(x.size());
+  for (int i = 0; i < size && gcd != 1; ++i) {
     int64_t value = std::abs(std::round(x[i] * scaling_factor));
     DCHECK_GE(value, 0);
     if (value == 0) continue;

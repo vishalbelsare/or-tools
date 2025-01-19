@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -28,9 +28,9 @@ public final class IntervalVar {
     ConstraintProto.Builder ct = modelBuilder.addConstraintsBuilder();
     ct.setName(name);
     this.intervalBuilder = ct.getIntervalBuilder();
-    this.intervalBuilder.setStartView(startBuilder);
-    this.intervalBuilder.setSizeView(sizeBuilder);
-    this.intervalBuilder.setEndView(endBuilder);
+    this.intervalBuilder.setStart(startBuilder);
+    this.intervalBuilder.setSize(sizeBuilder);
+    this.intervalBuilder.setEnd(endBuilder);
   }
 
   IntervalVar(CpModelProto.Builder builder, LinearExpressionProto.Builder startBuilder,
@@ -42,9 +42,9 @@ public final class IntervalVar {
     ct.setName(name);
     ct.addEnforcementLiteral(isPresentIndex);
     this.intervalBuilder = ct.getIntervalBuilder();
-    this.intervalBuilder.setStartView(startBuilder);
-    this.intervalBuilder.setSizeView(sizeBuilder);
-    this.intervalBuilder.setEndView(endBuilder);
+    this.intervalBuilder.setStart(startBuilder);
+    this.intervalBuilder.setSize(sizeBuilder);
+    this.intervalBuilder.setEnd(endBuilder);
   }
 
   @Override
@@ -65,6 +65,21 @@ public final class IntervalVar {
   /** Returns the name passed in the constructor. */
   public String getName() {
     return modelBuilder.getConstraints(constraintIndex).getName();
+  }
+
+  /** Returns the start expression. */
+  public LinearExpr getStartExpr() {
+    return LinearExpr.rebuildFromLinearExpressionProto(intervalBuilder.getStart());
+  }
+
+  /** Returns the size expression. */
+  public LinearExpr getSizeExpr() {
+    return LinearExpr.rebuildFromLinearExpressionProto(intervalBuilder.getSize());
+  }
+
+  /** Returns the end expression. */
+  public LinearExpr getEndExpr() {
+    return LinearExpr.rebuildFromLinearExpressionProto(intervalBuilder.getEnd());
   }
 
   private final CpModelProto.Builder modelBuilder;

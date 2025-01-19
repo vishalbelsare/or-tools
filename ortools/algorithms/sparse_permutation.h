@@ -1,4 +1,4 @@
-// Copyright 2010-2021 Google LLC
+// Copyright 2010-2024 Google LLC
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -17,6 +17,7 @@
 #include <string>
 #include <vector>
 
+#include "absl/types/span.h"
 #include "ortools/base/logging.h"
 
 namespace operations_research {
@@ -66,7 +67,7 @@ class SparsePermutation {
 
   // Removes the cycles with given indices from the permutation. This
   // works in O(K) for a permutation displacing K elements.
-  void RemoveCycles(const std::vector<int>& cycle_indices);
+  void RemoveCycles(absl::Span<const int> cycle_indices);
 
   // Output all non-identity cycles of the permutation, sorted
   // lexicographically (each cycle is described starting by its smallest
@@ -101,7 +102,7 @@ struct SparsePermutation::Iterator {
   typedef int value_type;
   typedef std::vector<int>::const_iterator const_iterator;
 
-  Iterator() {}
+  Iterator() = default;
   Iterator(const std::vector<int>::const_iterator& b,
            const std::vector<int>::const_iterator& e)
       : begin_(b), end_(e) {}
